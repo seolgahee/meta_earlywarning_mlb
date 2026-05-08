@@ -46,27 +46,63 @@ SMTP_SERVER      = os.getenv("SMTP_SERVER", "smtp.office365.com")
 SMTP_PORT        = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER        = os.getenv("SMTP_USER")
 SMTP_PASSWORD    = os.getenv("SMTP_PASSWORD")
-ALERT_RECIPIENTS = os.getenv("ALERT_RECIPIENTS", "")
-
 GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL      = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
-SLACK_WEBHOOK_URL      = os.getenv("SLACK_WEBHOOK_URL", "")       # MLB 성인 (캠페인명 M으로 시작)
-SLACK_WEBHOOK_URL_KIDS = os.getenv("SLACK_WEBHOOK_URL_KIDS", "")  # MLB 키즈 (캠페인명 I로 시작)
-
-BRAND          = "MLB"
 ALERT_LOG_FILE = "alert_sent_log.json"
 
 SNOWFLAKE_STOCK_SCHEMA = os.getenv("SNOWFLAKE_STOCK_SCHEMA", "PRCS")
-STOCK_BRAND_CD         = os.getenv("STOCK_BRAND_CD", "MLB")
 JASAMOL_SHOP_ID        = os.getenv("JASAMOL_SHOP_ID", "30001")  # 온라인쇼핑몰(직) = 자사몰
 
+# 한 레포에서 두 브랜드를 동시 처리. fetch_insights는 공유 META 계정에서 1회 호출하고
+# 캠페인명 토큰으로 분기해 cfg별로 적재/평가/알럿을 돌린다.
+BRAND_CONFIGS = [
+    {
+        "brand":            "MLB",
+        "campaign_token":   "M",
+        "stock_brand_cd":   "M",
+        "slack_webhook":    os.getenv("SLACK_WEBHOOK_URL", ""),
+        "alert_recipients": os.getenv("ALERT_RECIPIENTS", ""),
+    },
+    {
+        "brand":            "MLB_KIDS",
+        "campaign_token":   "I",
+        "stock_brand_cd":   "I",
+        "slack_webhook":    os.getenv("SLACK_WEBHOOK_URL_KIDS", ""),
+        "alert_recipients": os.getenv("ALERT_RECIPIENTS_KIDS", ""),
+    },
+]
 
-def _get_slack_webhook(campaign_name: str) -> str:
-    """캠페인명 첫 글자 기준 슬랙 채널 결정. I → 키즈, 그 외(M 등) → 성인."""
-    if campaign_name and campaign_name[0].upper() == "I":
-        return SLACK_WEBHOOK_URL_KIDS
-    return SLACK_WEBHOOK_URL
+
+def filter_by_campaign_token(df: "pd.DataFrame", token: str) -> "pd.DataFrame":
+    """campaign_name을 underscore로 split 후 첫 번째 필드(prefix)가 token과
+    정확히 일치하는 행만 남긴다. M/I는 단일 문자라 substring 매칭은 위험하므로
+    구분자 split 후 정확 일치를 사용한다.
+    """
+    if df.empty:
+        return df
+
+    token_upper = token.upper()
+    matched_mask = df["CAMPAIGN_NAME"].fillna("").apply(
+        lambda name: name.split("_")[0].strip().upper() == token_upper
+    )
+
+    matched   = df[matched_mask]
+    unmatched = df[~matched_mask]
+
+    print(f"  [filter token={token}] 매칭 {len(matched)}행 / 미매칭 {len(unmatched)}행")
+    if len(unmatched) > 0:
+        unmatched_samples = unmatched["CAMPAIGN_NAME"].drop_duplicates().head(3).tolist()
+        print(f"  [filter token={token}] 미매칭 캠페인명 샘플 3개: {unmatched_samples}")
+
+    return matched
+
+
+def tag_brand(df: "pd.DataFrame", brand: str) -> "pd.DataFrame":
+    """DataFrame의 BRAND 컬럼을 cfg['brand'] 값으로 채움."""
+    df = df.copy()
+    df["BRAND"] = brand
+    return df
 
 if not ACCESS_TOKEN or not AD_ACCOUNT_ID:
     print("[오류] .env에 META_ACCESS_TOKEN, META_AD_ACCOUNT_ID 값이 없습니다.")
@@ -92,9 +128,9 @@ def check_operating_hours() -> None:
 # ─────────────────────────────────────────
 # Opportunity 공통 필터 (Performance 캠페인 전용 — BR은 BR_ALERT_CONDITIONS 사용)
 OPP_FILTER = {
-    "purchases_6h_min":   2,
-    "spend_6h_min":       10_000,
-    "roas_6h_min":        3.0,   # 300%
+    "purchases_6h_min":   2,           # TODO(per-brand): MLB 성인/키즈 재산출 대상
+    "spend_6h_min":       10_000,      # TODO(per-brand): MLB 성인/키즈 재산출 대상
+    "roas_6h_min":        3.0,   # 300%   # TODO(per-brand): MLB 성인/키즈 재산출 대상
     # roas_6h >= roas_12h 는 코드에서 직접 비교
 }
 
@@ -102,32 +138,32 @@ OPP_FILTER = {
 # ASC 통합 구조 기준: ad_id 단위 개별 소재 예산 조정 불가 → 캠페인 일cap/일예산 조정만 가능
 ACTION_CONDITIONS = {
     "CAMPAIGN_SCALE": {
-        "roas_6h_min":      3.0,   # 300%
-        "purchases_6h_min": 3,
+        "roas_6h_min":      3.0,   # 300%   # TODO(per-brand): MLB 성인/키즈 재산출 대상
+        "purchases_6h_min": 3,             # TODO(per-brand): MLB 성인/키즈 재산출 대상
         "guide": "전환 효율이 급증한 구간입니다. ASC 캠페인 일cap 상향을 검토하세요.",
     },
     "PRODUCT_EXTRACTION": {
-        "roas_6h_min":  3.0,       # 300%
-        "spend_6h_min": 50_000,
+        "roas_6h_min":  3.0,       # 300%   # TODO(per-brand): MLB 성인/키즈 재산출 대상
+        "spend_6h_min": 50_000,            # TODO(per-brand): MLB 성인/키즈 재산출 대상
         "guide": "해당 소재 내 상품을 확인하여 동일 상품 기반 신규 소재 2~3종 추가 제작을 권장합니다.",
     },
     "CREATIVE_EXPANSION": {
-        "roas_6h_min":      2.5,   # 250%
-        "purchases_6h_min": 2,
+        "roas_6h_min":      2.5,   # 250%   # TODO(per-brand): MLB 성인/키즈 재산출 대상
+        "purchases_6h_min": 2,             # TODO(per-brand): MLB 성인/키즈 재산출 대상
         "guide": "해당 소재 내 상품을 확인하여 동일 상품 기반 신규 소재 2~3종 추가 제작을 권장합니다.",
     },
 }
 
 # BR(브랜딩) 캠페인 전용 알럿 조건 — 전환 지표 사용 안 함
 BR_ALERT_CONDITIONS = {
-    "impressions_6h_min": 10_000,
-    "clicks_6h_min":      200,
+    "impressions_6h_min": 10_000,   # TODO(per-brand): MLB 성인/키즈 재산출 대상
+    "clicks_6h_min":      200,      # TODO(per-brand): MLB 성인/키즈 재산출 대상
 }
 
 # Kill Alert 조건
 KILL_CONDITION = {
-    "roas_12h_max":  1.2,     # 120%
-    "spend_12h_min": 150_000,
+    "roas_12h_max":  1.2,     # 120%   # TODO(per-brand): MLB 성인/키즈 재산출 대상
+    "spend_12h_min": 150_000,         # TODO(per-brand): MLB 성인/키즈 재산출 대상
 }
 
 
@@ -202,7 +238,7 @@ def extract_product_code(ad_name: str) -> tuple[str, str] | tuple[None, None]:
 _SIZE_ORDER = {"XS": 0, "S": 1, "M": 2, "L": 3, "XL": 4, "XXL": 5, "XXXL": 6}
 
 
-def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
+def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str) -> dict | None:
     """
     DW_SCS_DACUM(물류재고) + DW_SCS_D(금주 온라인 판매) 기반 재고/주치 조회.
     반환: {
@@ -240,7 +276,7 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
                 WHERE d.BRD_CD = %s AND d.PART_CD = %s AND d.COLOR_CD = %s
                   AND d.START_DT = ({latest_dt_sub})
                 GROUP BY d.SIZE_CD
-            """, (STOCK_BRAND_CD, part_cd, color_cd, STOCK_BRAND_CD, part_cd))
+            """, (stock_brand_cd, part_cd, color_cd, stock_brand_cd, part_cd))
         else:
             # 전체 컬러 → 컬러별 물류재고 합산
             cursor.execute(f"""
@@ -255,12 +291,12 @@ def fetch_stock_info(part_cd: str, color_cd: str) -> dict | None:
                   AND d.START_DT = ({latest_dt_sub})
                 GROUP BY d.COLOR_CD
                 ORDER BY WH_STOCK DESC
-            """, (STOCK_BRAND_CD, part_cd, STOCK_BRAND_CD, part_cd))
+            """, (stock_brand_cd, part_cd, stock_brand_cd, part_cd))
         stock_rows = cursor.fetchall()
 
         # 최근 7일 자사몰(온라인쇼핑몰 직영) 판매량 (DW_SH_SCS_D, SHOP_ID=자사몰)
         color_filter = "AND COLOR_CD = %s" if color_cd else ""
-        sale_params = [STOCK_BRAND_CD, JASAMOL_SHOP_ID, part_cd] + ([color_cd] if color_cd else [])
+        sale_params = [stock_brand_cd, JASAMOL_SHOP_ID, part_cd] + ([color_cd] if color_cd else [])
         cursor.execute(f"""
             SELECT SUM(SALE_NML_QTY - SALE_RET_QTY) AS SALE_QTY
             FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SH_SCS_D
@@ -324,9 +360,9 @@ def _status_badge_info(dos, total_wh):
     """(상태 텍스트, 배경색) 반환."""
     if total_wh == 0:
         return "즉시", "#c0392b"
-    elif dos is not None and dos < 7:
+    elif dos is not None and dos < 7:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
         return "긴급", "#e74c3c"
-    elif dos is not None and dos < 14:
+    elif dos is not None and dos < 14:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
         return "주의", "#f39c12"
     else:
         return "안정", "#27ae60"
@@ -374,9 +410,9 @@ def format_stock_summary(stock_info) -> str:
     sale_info = f"최근 7일 {sale_7d}개 판매 · 일평균 {daily_avg}개" if sale_7d else "판매 데이터 없음"
     if total_wh == 0:
         guide = f"물류창고 소진 · 광고 중단 검토 · {sale_info}"
-    elif dos is not None and dos < 7:
+    elif dos is not None and dos < 7:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
         guide = f"~{int(dos)}일치 · 1주 내 소진 예상 · 자사몰 물류 즉시 보충 필요 · {sale_info}"
-    elif dos is not None and dos < 14:
+    elif dos is not None and dos < 14:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
         guide = f"~{int(dos)}일치 · 2주 내 소진 예상 · 자사몰로 물류 이동 검토 · {sale_info}"
     else:
         dos_str = f"~{int(dos)}일치" if dos else "판매 없음"
@@ -393,9 +429,9 @@ def format_stock_md_guide(stock_info) -> str:
         sale_info = f"자사몰 최근 7일 판매 {sale_7d}개 · 일평균 {daily_avg}개" if sale_7d else "판매 데이터 없음"
         if total_wh == 0:
             return f"[즉시] 온라인 물류창고 재고 없음 (매장 재고 {total_all}개) → 광고 전환 대응 불가, 자사몰로 즉시 물류 이동 필요"
-        elif dos is not None and dos < 7:
+        elif dos is not None and dos < 7:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
             return f"[긴급] ~{int(dos)}일치, {sale_info} → 광고 전환 증가 예상, 자사몰 물류 즉시 보충 필수"
-        elif dos is not None and dos < 14:
+        elif dos is not None and dos < 14:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
             return f"[주의] ~{int(dos)}일치, {sale_info} → 전환 지속 시 2주 내 소진 예상, 자사몰로 물류 이동 검토"
         else:
             dos_str = f"~{int(dos)}일치" if dos else "판매 없음"
@@ -497,9 +533,9 @@ def build_stock_html(stock_info) -> str:
     def _action_text(total_wh, total_all, dos):
         if total_wh == 0:
             return f"물류창고 재고 없음 (매장 {total_all:,}개) → 즉시 물류 이동 필요"
-        elif dos is not None and dos < 7:
+        elif dos is not None and dos < 7:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
             return "광고 전환 증가 예상 → 자사몰 물류 즉시 보충 필수"
-        elif dos is not None and dos < 14:
+        elif dos is not None and dos < 14:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
             return "2주 내 소진 예상 → 자사몰 물류 이동 검토"
         else:
             return "광고 지속 운영 가능"
@@ -722,7 +758,7 @@ def determine_br_subtype(ctr_6h: float, ctr_12h: float) -> str | None:
     """
     if ctr_6h > ctr_12h:
         return "BR_CTR_SURGE"
-    if ctr_12h > 0 and ctr_6h < ctr_12h * 0.8:
+    if ctr_12h > 0 and ctr_6h < ctr_12h * 0.8:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
         return "BR_CTR_DROP"
     return None
 
@@ -742,9 +778,15 @@ def save_alert_log(log: dict) -> None:
         json.dump(log, f, ensure_ascii=False, indent=2)
 
 
-def is_recently_alerted(ad_id: str, hours: int = 12) -> bool:
+def _alert_log_key(ad_id: str, brand: str) -> str:
+    """두 브랜드가 META 계정을 공유하므로 ad_id는 글로벌 유니크지만,
+    안전하게 brand prefix를 붙여 키 충돌·교차 영향을 차단한다."""
+    return f"{brand}:{ad_id}"
+
+
+def is_recently_alerted(ad_id: str, brand: str, hours: int = 12) -> bool:
     log = load_alert_log()
-    entry = log.get(str(ad_id), {})
+    entry = log.get(_alert_log_key(ad_id, brand), {})
     last_sent_str = entry.get("last_sent") if isinstance(entry, dict) else entry
     if not last_sent_str:
         return False
@@ -752,9 +794,9 @@ def is_recently_alerted(ad_id: str, hours: int = 12) -> bool:
     return datetime.now(timezone.utc) - last_sent < timedelta(hours=hours)
 
 
-def get_repeat_count(ad_id: str, days: int = 7) -> int:
+def get_repeat_count(ad_id: str, brand: str, days: int = 7) -> int:
     log = load_alert_log()
-    entry = log.get(str(ad_id), {})
+    entry = log.get(_alert_log_key(ad_id, brand), {})
     if not isinstance(entry, dict):
         return 1 if entry else 0
     history = entry.get("history", [])
@@ -762,10 +804,10 @@ def get_repeat_count(ad_id: str, days: int = 7) -> int:
     return sum(1 for ts in history if datetime.fromisoformat(ts) >= cutoff)
 
 
-def mark_alert_sent(ad_id: str) -> None:
+def mark_alert_sent(ad_id: str, brand: str) -> None:
     log   = load_alert_log()
     now   = datetime.now(timezone.utc).isoformat()
-    key   = str(ad_id)
+    key   = _alert_log_key(ad_id, brand)
     entry = log.get(key, {})
     if not isinstance(entry, dict):
         entry = {}
@@ -939,9 +981,9 @@ def build_action_guide(alert: dict, stock_info) -> str:
         dos      = stock_info.get("days_of_supply")
         if total_wh == 0:
             stock_warn = "🚨 온라인 물류창고 재고 없음 → 광고 중단 후 자사몰 물류 이동 필요"
-        elif dos is not None and dos < 7:
+        elif dos is not None and dos < 7:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
             stock_warn = f"⚠️ 재고 {int(dos)}일치 — 자사몰 물류 즉시 보충 필수"
-        elif dos is not None and dos < 14:
+        elif dos is not None and dos < 14:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
             stock_warn = f"⚠️ 재고 {int(dos)}일치 — 자사몰로 물류 이동 검토"
 
     # ── ② 소재 액션 ──
@@ -977,7 +1019,7 @@ def build_action_guide(alert: dict, stock_info) -> str:
     stock_urgent = no_stock or (
         stock_info and not isinstance(stock_info, list)
         and stock_info.get("days_of_supply") is not None
-        and stock_info["days_of_supply"] < 7
+        and stock_info["days_of_supply"] < 7   # TODO(per-brand): MLB 성인/키즈 재산출 대상
     )
     off_action = "광고 OFF 검토" if stock_urgent else ""
 
@@ -1005,7 +1047,7 @@ ACTION_TYPE_COLOR = {
 }
 
 
-def build_email_html(alerts: list) -> str:
+def build_email_html(alerts: list, brand: str) -> str:
     now_kst = datetime.now(timezone.utc) + timedelta(hours=9)
     blocks  = ""
 
@@ -1256,7 +1298,7 @@ def build_email_html(alerts: list) -> str:
     <html><body style="font-family:Arial,sans-serif;color:#333;max-width:700px;margin:0 auto;padding:20px;">
       <h2 style="color:#1a73e8;margin-bottom:4px;">Meta Ads Opportunity Alert</h2>
       <p style="color:#888;font-size:13px;margin-top:0;">
-        {BRAND} &nbsp;|&nbsp; {now_kst.strftime('%Y-%m-%d %H:%M')} KST
+        {brand} &nbsp;|&nbsp; {now_kst.strftime('%Y-%m-%d %H:%M')} KST
       </p>
       {blocks}
       <p style="margin-top:24px;font-size:11px;color:#aaa;border-top:1px solid #eee;padding-top:12px;">
@@ -1266,25 +1308,24 @@ def build_email_html(alerts: list) -> str:
     """
 
 
-def send_alert_email(alerts: list) -> None:
+def send_alert_email(alerts: list, cfg: dict) -> None:
     if not SMTP_USER or not SMTP_PASSWORD:
         print("[경고] SMTP 설정 없음 - 이메일 발송 건너뜀")
         return
 
-    recipients = [r.strip() for r in ALERT_RECIPIENTS.split(",") if r.strip()]
+    recipients = [r.strip() for r in cfg["alert_recipients"].split(",") if r.strip()]
     if not recipients:
-        print("[경고] ALERT_RECIPIENTS 없음 - 이메일 발송 건너뜀")
+        print(f"[경고] {cfg['brand']} 수신자 없음 - 이메일 발송 건너뜀")
         return
 
-    # action_type 목록을 제목에 표시
     types_str = ", ".join(sorted({a["action_type"] for a in alerts}))
-    subject   = f"[Opportunity Alert - {types_str}] {BRAND} ({len(alerts)}개 광고)"
+    subject   = f"[Opportunity Alert - {types_str}] {cfg['brand']} ({len(alerts)}개 광고)"
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"]    = SMTP_USER
     msg["To"]      = ", ".join(recipients)
-    msg.attach(MIMEText(build_email_html(alerts), "html", "utf-8"))
+    msg.attach(MIMEText(build_email_html(alerts, cfg["brand"]), "html", "utf-8"))
 
     try:
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
@@ -1293,15 +1334,15 @@ def send_alert_email(alerts: list) -> None:
             server.ehlo()
             server.login(SMTP_USER, SMTP_PASSWORD)
             server.sendmail(SMTP_USER, recipients, msg.as_string())
-        print(f"[완료] 이메일 발송 성공 -> {', '.join(recipients)}")
+        print(f"[완료] 이메일 발송 성공 ({cfg['brand']}) -> {', '.join(recipients)}")
     except Exception as e:
-        print(f"[오류] 이메일 발송 실패: {e}")
+        print(f"[오류] 이메일 발송 실패 ({cfg['brand']}): {e}")
 
 
 # ─────────────────────────────────────────
 # Slack 알림
 # ─────────────────────────────────────────
-def send_slack_alert(alerts: list) -> None:
+def send_slack_alert(alerts: list, cfg: dict) -> None:
     for a in alerts:
         alert_subtype = a.get("alert_subtype", "DEFAULT")
         is_br         = a.get("alert_type") == "BR"
@@ -1316,7 +1357,7 @@ def send_slack_alert(alerts: list) -> None:
             subtype_label = "CTR 상승형" if alert_subtype == "BR_CTR_SURGE" else "CTR 하락형"
             header_text   = f":bar_chart: *BR 브랜딩 Alert* — `{subtype_label}`"
             blocks = [
-                {"type": "header", "text": {"type": "plain_text", "text": f"Meta Ads BR 브랜딩 Alert · {BRAND}"}},
+                {"type": "header", "text": {"type": "plain_text", "text": f"Meta Ads BR 브랜딩 Alert · {cfg['brand']}"}},
                 {"type": "section", "text": {"type": "mrkdwn", "text": header_text}},
                 {"type": "section", "fields": [
                     {"type": "mrkdwn", "text": f"*분류*\nBR 브랜딩  ·  최근 7일 {repeat_label}"},
@@ -1360,7 +1401,7 @@ def send_slack_alert(alerts: list) -> None:
             }.get(alert_subtype, "")
             header_text = f":mega: *Opportunity Alert* — {action_type}" + (f"  `{subtype_label}`" if subtype_label else "")
             blocks = [
-                {"type": "header", "text": {"type": "plain_text", "text": f"Meta Ads Opportunity Alert · {BRAND}"}},
+                {"type": "header", "text": {"type": "plain_text", "text": f"Meta Ads Opportunity Alert · {cfg['brand']}"}},
                 {"type": "section", "text": {"type": "mrkdwn", "text": header_text}},
                 {"type": "section", "fields": [
                     {"type": "mrkdwn", "text": f"*분류*\n{action_ko}  ·  최근 7일 {repeat_label}"},
@@ -1418,9 +1459,9 @@ def send_slack_alert(alerts: list) -> None:
                 "alt_text": a["ad_name"],
             })
 
-        webhook_url = _get_slack_webhook(a.get("campaign_name", ""))
+        webhook_url = cfg["slack_webhook"]
         if not webhook_url:
-            print(f"[경고] SLACK_WEBHOOK_URL 없음 - 슬랙 발송 건너뜀 ({a['ad_name']})")
+            print(f"[경고] {cfg['brand']} SLACK_WEBHOOK_URL 없음 - 슬랙 발송 건너뜀 ({a['ad_name']})")
             continue
         try:
             resp = requests.post(
@@ -1550,7 +1591,6 @@ def build_dataframe(raw_data: list) -> pd.DataFrame:
 
         rows.append({
             "SNAPSHOT_TS":     snapshot_ts,
-            "BRAND":           BRAND,
             "CHANNEL":         detect_channel(campaign_name, adset_name),
             "AD_ACCOUNT_ID":   AD_ACCOUNT_ID,
             "CAMPAIGN_ID":     item.get("campaign_id"),
@@ -1600,7 +1640,7 @@ def get_snowflake_conn():
     )
 
 
-def load_to_snowflake(df: pd.DataFrame) -> None:
+def load_to_snowflake(df: pd.DataFrame, cfg: dict) -> None:
     required = [SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, (SNOWFLAKE_PRIVATE_KEY or SNOWFLAKE_PRIVATE_KEY_PATH),
                 SNOWFLAKE_WAREHOUSE, SNOWFLAKE_DATABASE, SNOWFLAKE_SCHEMA]
     if not all(required):
@@ -1634,7 +1674,7 @@ def load_to_snowflake(df: pd.DataFrame) -> None:
 # ─────────────────────────────────────────
 # Alert 판단
 # ─────────────────────────────────────────
-def evaluate_alerts(df_now: pd.DataFrame) -> None:
+def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
     required = [SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, (SNOWFLAKE_PRIVATE_KEY or SNOWFLAKE_PRIVATE_KEY_PATH),
                 SNOWFLAKE_WAREHOUSE, SNOWFLAKE_DATABASE, SNOWFLAKE_SCHEMA]
     if not all(required):
@@ -1662,7 +1702,7 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
                                ))
                            ) AS rn
                     FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_SCHEMA}.{SNOWFLAKE_TABLE.upper()}
-                    WHERE brand = '{BRAND}'
+                    WHERE brand = '{cfg["brand"]}'
                       AND snapshot_ts >= DATEADD('hour', -{hours + 2},
                               CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP()))
                       AND snapshot_ts <= DATEADD('hour', -{hours - 2},
@@ -1748,8 +1788,8 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
             print(f"  impressions_6h={int(row['impressions_6h']):,}  clicks_6h={int(row['clicks_6h']):,}"
                   f"  ctr_6h={row['ctr_6h']:.2%}  ctr_12h={row['ctr_12h']:.2%}")
 
-            if not is_recently_alerted(row["AD_ID"]):
-                repeat_count       = get_repeat_count(row["AD_ID"])
+            if not is_recently_alerted(row["AD_ID"], cfg["brand"]):
+                repeat_count       = get_repeat_count(row["AD_ID"], cfg["brand"])
                 creative_image_url = fetch_creative_image(row["AD_ID"])
                 br_alert_data = {
                     "alert_type":         "BR",
@@ -1811,8 +1851,8 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
                   f"  roas_prev_6h={row['roas_prev_6h']:.1%}"
                   f"  ctr_6h={row['ctr_6h']:.2%}  ctr_12h={row['ctr_12h']:.2%}")
 
-            if not is_recently_alerted(row["AD_ID"]):
-                repeat_count  = get_repeat_count(row["AD_ID"])
+            if not is_recently_alerted(row["AD_ID"], cfg["brand"]):
+                repeat_count  = get_repeat_count(row["AD_ID"], cfg["brand"])
                 alert_subtype = determine_alert_subtype(
                     row["ctr_6h"], row["ctr_12h"],
                     row["purchases_6h"], row["roas_6h"], row["roas_12h"],
@@ -1838,7 +1878,8 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
 
                 stock_items = []
                 for pc, cc in product_codes:
-                    info = fetch_stock_info(pc, cc)
+                    print(f"  [재고조회] brand={cfg['brand']} stock_brand_cd={cfg['stock_brand_cd']} part={pc} color={cc or '-'}")
+                    info = fetch_stock_info(pc, cc, cfg["stock_brand_cd"])
                     if info:
                         stock_items.append(info)
                     else:
@@ -1904,10 +1945,10 @@ def evaluate_alerts(df_now: pd.DataFrame) -> None:
 
     all_alerts = opp_alerts + br_alerts
     if all_alerts:
-        send_alert_email(all_alerts)
-        send_slack_alert(all_alerts)
+        send_alert_email(all_alerts, cfg)
+        send_slack_alert(all_alerts, cfg)
         for a in all_alerts:
-            mark_alert_sent(a["ad_id"])
+            mark_alert_sent(a["ad_id"], cfg["brand"])
 
 
 # ─────────────────────────────────────────
@@ -1920,10 +1961,15 @@ if __name__ == "__main__":
         print("[결과] 데이터 없음. 오늘 활성 광고가 없거나 API 오류.")
         exit(0)
 
-    df = build_dataframe(raw_data)
-    print(f"\n[결과] 전체 행 수: {len(df)}")
+    df_full = build_dataframe(raw_data)
+    print(f"\n[결과] 전체 행 수: {len(df_full)}")
     print("\n[결과] 상위 5개 행:")
-    print(df[["CHANNEL", "AD_NAME", "SPEND_CUM", "PURCHASES_CUM", "REVENUE_CUM"]].head())
+    print(df_full[["CHANNEL", "AD_NAME", "SPEND_CUM", "PURCHASES_CUM", "REVENUE_CUM"]].head())
 
-    load_to_snowflake(df)
-    evaluate_alerts(df)
+    for cfg in BRAND_CONFIGS:
+        print(f"\n[{cfg['brand']}] 시작 - campaign_token={cfg['campaign_token']}, stock_brand_cd={cfg['stock_brand_cd']}")
+        df_brand = filter_by_campaign_token(df_full, cfg["campaign_token"])
+        df_brand = tag_brand(df_brand, cfg["brand"])
+        print(f"[{cfg['brand']}] 필터 후 행 수: {len(df_brand)}")
+        load_to_snowflake(df_brand, cfg)
+        evaluate_alerts(df_brand, cfg)
