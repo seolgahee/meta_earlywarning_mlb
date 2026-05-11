@@ -52,15 +52,16 @@ GEMINI_MODEL      = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 ALERT_LOG_FILE = "alert_sent_log.json"
 
 SNOWFLAKE_STOCK_SCHEMA = os.getenv("SNOWFLAKE_STOCK_SCHEMA", "PRCS")
-JASAMOL_SHOP_ID        = os.getenv("JASAMOL_SHOP_ID", "30001")  # 온라인쇼핑몰(직) = 자사몰
 
 # 한 레포에서 두 브랜드를 동시 처리. fetch_insights는 공유 META 계정에서 1회 호출하고
 # 캠페인명 토큰으로 분기해 cfg별로 적재/평가/알럿을 돌린다.
+# jasamol_shop_id: DB_SHOP에서 ANLYS_DIST_TYPE_CD='N1' 메인 자사몰 SHOP_ID
 BRAND_CONFIGS = [
     {
         "brand":            "MLB",
         "campaign_token":   "M",
         "stock_brand_cd":   "M",
+        "jasamol_shop_id":  "510",     # (주)에프앤에프 MLB 성인 자사몰
         "slack_webhook":    os.getenv("SLACK_WEBHOOK_URL", ""),
         "alert_recipients": os.getenv("ALERT_RECIPIENTS", ""),
     },
@@ -68,6 +69,7 @@ BRAND_CONFIGS = [
         "brand":            "MLB_KIDS",
         "campaign_token":   "I",
         "stock_brand_cd":   "I",
+        "jasamol_shop_id":  "50002",   # (주)에프앤에프 MLB 키즈 자사몰
         "slack_webhook":    os.getenv("SLACK_WEBHOOK_URL_KIDS", ""),
         "alert_recipients": os.getenv("ALERT_RECIPIENTS_KIDS", ""),
     },
@@ -166,6 +168,18 @@ KILL_CONDITION = {
     "spend_12h_min": 150_000,         # TODO(per-brand): MLB 성인/키즈 재산출 대상
 }
 
+# 재고 일수(DoS) 컷오프 — 자사몰 일평균 판매 회전 차이 반영
+# urgent: 광고 OFF/즉시 보충, warning: 물류 이동 검토
+DOS_CUTOFFS = {
+    "M": {"urgent": 5,  "warning": 10},   # MLB 성인 (일판매 평균 1.5개, 회전 느림)
+    "I": {"urgent": 7,  "warning": 14},   # MLB 키즈 (일판매 평균 2.1개)
+}
+DOS_CUTOFF_DEFAULT = {"urgent": 7, "warning": 14}
+
+
+def _dos_cutoffs(brand_cd: str) -> dict:
+    return DOS_CUTOFFS.get(brand_cd, DOS_CUTOFF_DEFAULT)
+
 
 # ─────────────────────────────────────────
 # 유틸
@@ -228,7 +242,7 @@ def extract_product_code(ad_name: str) -> tuple[str, str] | tuple[None, None]:
 _SIZE_ORDER = {"XS": 0, "S": 1, "M": 2, "L": 3, "XL": 4, "XXL": 5, "XXXL": 6}
 
 
-def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str) -> dict | None:
+def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str, jasamol_shop_id: str) -> dict | None:
     """
     DW_SCS_DACUM(물류재고) + DW_SCS_D(금주 온라인 판매) 기반 재고/주치 조회.
     반환: {
@@ -286,7 +300,7 @@ def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str) -> dict |
 
         # 최근 7일 자사몰(온라인쇼핑몰 직영) 판매량 (DW_SH_SCS_D, SHOP_ID=자사몰)
         color_filter = "AND COLOR_CD = %s" if color_cd else ""
-        sale_params = [stock_brand_cd, JASAMOL_SHOP_ID, part_cd] + ([color_cd] if color_cd else [])
+        sale_params = [stock_brand_cd, jasamol_shop_id, part_cd] + ([color_cd] if color_cd else [])
         cursor.execute(f"""
             SELECT SUM(SALE_NML_QTY - SALE_RET_QTY) AS SALE_QTY
             FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SH_SCS_D
@@ -317,6 +331,7 @@ def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str) -> dict |
             days_of_supply = round(total_wh / daily_avg, 0) if daily_avg > 0 else None
             return {
                 "prdt_nm":        prdt_nm,
+                "brand_cd":       stock_brand_cd,
                 "is_mc":          is_mc,
                 "sizes":          sizes,
                 "sale_7d":        sale_7d,
@@ -330,6 +345,7 @@ def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str) -> dict |
             days_of_supply = round(total_wh / daily_avg, 0) if daily_avg > 0 else None
             return {
                 "prdt_nm":        prdt_nm,
+                "brand_cd":       stock_brand_cd,
                 "is_mc":          is_mc,
                 "colors":         colors,
                 "sale_7d":        sale_7d,
@@ -346,13 +362,14 @@ def _stock_items(stock_info_item):
     return stock_info_item.get("sizes") or stock_info_item.get("colors") or []
 
 
-def _status_badge_info(dos, total_wh):
-    """(상태 텍스트, 배경색) 반환."""
+def _status_badge_info(dos, total_wh, brand_cd: str = "M"):
+    """(상태 텍스트, 배경색) 반환. brand_cd 기준 DOS_CUTOFFS 적용."""
     if total_wh == 0:
         return "즉시", "#c0392b"
-    elif dos is not None and dos < 7:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
+    cutoffs = _dos_cutoffs(brand_cd)
+    if dos is not None and dos < cutoffs["urgent"]:
         return "긴급", "#e74c3c"
-    elif dos is not None and dos < 14:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
+    elif dos is not None and dos < cutoffs["warning"]:
         return "주의", "#f39c12"
     else:
         return "안정", "#27ae60"
@@ -397,13 +414,14 @@ def format_stock_summary(stock_info) -> str:
     dos       = stock_info.get("days_of_supply")
     daily_avg = stock_info.get("daily_avg", 0)
     sale_7d   = stock_info.get("sale_7d", 0)
+    cutoffs   = _dos_cutoffs(stock_info.get("brand_cd", "M"))
     sale_info = f"최근 7일 {sale_7d}개 판매 · 일평균 {daily_avg}개" if sale_7d else "판매 데이터 없음"
     if total_wh == 0:
         guide = f"물류창고 소진 · 광고 중단 검토 · {sale_info}"
-    elif dos is not None and dos < 7:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
-        guide = f"~{int(dos)}일치 · 1주 내 소진 예상 · 자사몰 물류 즉시 보충 필요 · {sale_info}"
-    elif dos is not None and dos < 14:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
-        guide = f"~{int(dos)}일치 · 2주 내 소진 예상 · 자사몰로 물류 이동 검토 · {sale_info}"
+    elif dos is not None and dos < cutoffs["urgent"]:
+        guide = f"~{int(dos)}일치 · 단기 소진 예상 · 자사몰 물류 즉시 보충 필요 · {sale_info}"
+    elif dos is not None and dos < cutoffs["warning"]:
+        guide = f"~{int(dos)}일치 · 2주 내외 소진 예상 · 자사몰로 물류 이동 검토 · {sale_info}"
     else:
         dos_str = f"~{int(dos)}일치" if dos else "판매 없음"
         guide = f"재고 여유 · {dos_str} · 일cap 상향 검토 가능 · {sale_info}"
@@ -415,14 +433,15 @@ def format_stock_md_guide(stock_info) -> str:
     if not stock_info:
         return ""
     # 멀티 상품 리스트인 경우 상품별 컬러/재고 + 액션 가이드
-    def _action(total_wh, total_all, dos, sale_7d, daily_avg):
+    def _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd):
         sale_info = f"자사몰 최근 7일 판매 {sale_7d}개 · 일평균 {daily_avg}개" if sale_7d else "판매 데이터 없음"
+        cutoffs = _dos_cutoffs(brand_cd)
         if total_wh == 0:
             return f"[즉시] 온라인 물류창고 재고 없음 (매장 재고 {total_all}개) → 광고 전환 대응 불가, 자사몰로 즉시 물류 이동 필요"
-        elif dos is not None and dos < 7:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
+        elif dos is not None and dos < cutoffs["urgent"]:
             return f"[긴급] ~{int(dos)}일치, {sale_info} → 광고 전환 증가 예상, 자사몰 물류 즉시 보충 필수"
-        elif dos is not None and dos < 14:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
-            return f"[주의] ~{int(dos)}일치, {sale_info} → 전환 지속 시 2주 내 소진 예상, 자사몰로 물류 이동 검토"
+        elif dos is not None and dos < cutoffs["warning"]:
+            return f"[주의] ~{int(dos)}일치, {sale_info} → 전환 지속 시 단기 소진 예상, 자사몰로 물류 이동 검토"
         else:
             dos_str = f"~{int(dos)}일치" if dos else "판매 없음"
             return f"[안정] {dos_str}, {sale_info} → 광고 지속 운영 가능"
@@ -434,16 +453,17 @@ def format_stock_md_guide(stock_info) -> str:
             dos       = s.get("days_of_supply")
             sale_7d   = s.get("sale_7d", 0)
             daily_avg = s.get("daily_avg", 0)
+            brand_cd  = s.get("brand_cd", "M")
             if s.get("colors") is not None:
                 total_wh   = sum(c["wh"] for c in s["colors"])
                 total_all  = sum(c["total"] for c in s["colors"])
-                action = _action(total_wh, total_all, dos, sale_7d, daily_avg)
+                action = _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd)
                 lines.append(f"{nm}: {action}")
             else:
                 szs       = _stock_items(s)
                 total_wh  = sum(sz["wh"] for sz in szs)
                 total_all = sum(sz["total"] for sz in szs)
-                action = _action(total_wh, total_all, dos, sale_7d, daily_avg)
+                action = _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd)
                 lines.append(f"{nm}: {action}")
         return "\n".join(lines)
 
@@ -452,11 +472,12 @@ def format_stock_md_guide(stock_info) -> str:
     dos       = stock_info.get("days_of_supply")
     sale_7d   = stock_info.get("sale_7d", 0)
     daily_avg = stock_info.get("daily_avg", 0)
+    brand_cd  = stock_info.get("brand_cd", "M")
 
     # 컬러별 데이터인 경우 (color_cd 없이 조회된 단일 상품) — 색상별 재고는 재고 현황에 표시되므로 액션만 출력
     if stock_info.get("colors") is not None:
         total_all  = sum(c["total"] for c in stock_info["colors"])
-        action = _action(total_wh, total_all, dos, sale_7d, daily_avg)
+        action = _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd)
         return action
 
     sizes = items
@@ -477,7 +498,7 @@ def format_stock_md_guide(stock_info) -> str:
 
     total_all     = sum(s["total"] for s in sizes)
     zero_wh_sizes = [s["size"] for s in sizes if s["wh"] == 0 and s["total"] > 0]
-    action = _action(total_wh, total_all, dos, sale_7d, daily_avg)
+    action = _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd)
 
     if zero_wh_sizes:
         action += f" | {', '.join(zero_wh_sizes)} 물류창고 재고 없음 주의"
@@ -520,13 +541,14 @@ def build_stock_html(stock_info) -> str:
     TD_OR = 'style="padding:6px 10px;border:1px solid #ffe0b2;font-size:12px;color:#333;text-align:right;"'
     ROW_ALT_O = 'style="background:#fff8f0;"'
 
-    def _action_text(total_wh, total_all, dos):
+    def _action_text(total_wh, total_all, dos, brand_cd):
         if total_wh == 0:
             return f"물류창고 재고 없음 (매장 {total_all:,}개) → 즉시 물류 이동 필요"
-        elif dos is not None and dos < 7:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
+        cutoffs = _dos_cutoffs(brand_cd)
+        if dos is not None and dos < cutoffs["urgent"]:
             return "광고 전환 증가 예상 → 자사몰 물류 즉시 보충 필수"
-        elif dos is not None and dos < 14:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
-            return "2주 내 소진 예상 → 자사몰 물류 이동 검토"
+        elif dos is not None and dos < cutoffs["warning"]:
+            return "단기 소진 예상 → 자사몰 물류 이동 검토"
         else:
             return "광고 지속 운영 가능"
 
@@ -608,12 +630,12 @@ def build_stock_html(stock_info) -> str:
         f'</tr></thead>'
     )
 
-    def _md_row(nm, dos, sale_7d, daily_avg, total_wh, total_all, bg):
-        status, color = _status_badge_info(dos, total_wh)
+    def _md_row(nm, dos, sale_7d, daily_avg, total_wh, total_all, bg, brand_cd):
+        status, color = _status_badge_info(dos, total_wh, brand_cd)
         dos_str  = f"~{int(dos)}일" if dos else "-"
         sale_str = f"{int(sale_7d):,}개"  if sale_7d  else "-"
         avg_str  = f"{daily_avg:.1f}개"   if daily_avg else "-"
-        action   = _action_text(total_wh, total_all, dos)
+        action   = _action_text(total_wh, total_all, dos, brand_cd)
         return (
             f'<tr {bg}>'
             f'<td {TD_O}>{nm}</td>'
@@ -632,6 +654,7 @@ def build_stock_html(stock_info) -> str:
             dos       = s.get("days_of_supply")
             sale_7d   = s.get("sale_7d", 0)
             daily_avg = s.get("daily_avg", 0)
+            brand_cd  = s.get("brand_cd", "M")
             if s.get("colors") is not None:
                 total_wh  = sum(c["wh"]    for c in s["colors"])
                 total_all = sum(c["total"] for c in s["colors"])
@@ -640,11 +663,12 @@ def build_stock_html(stock_info) -> str:
                 total_wh  = sum(sz["wh"]    for sz in szs)
                 total_all = sum(sz["total"] for sz in szs)
             bg = ROW_ALT_O if i % 2 == 1 else ""
-            md_rows += _md_row(nm, dos, sale_7d, daily_avg, total_wh, total_all, bg)
+            md_rows += _md_row(nm, dos, sale_7d, daily_avg, total_wh, total_all, bg, brand_cd)
     else:
         dos       = stock_info.get("days_of_supply")
         sale_7d   = stock_info.get("sale_7d", 0)
         daily_avg = stock_info.get("daily_avg", 0)
+        brand_cd  = stock_info.get("brand_cd", "M")
         nm        = stock_info.get("prdt_nm", "") or ""
         if stock_info.get("colors") is not None:
             total_wh  = sum(c["wh"]    for c in stock_info["colors"])
@@ -653,7 +677,7 @@ def build_stock_html(stock_info) -> str:
             szs       = _stock_items(stock_info)
             total_wh  = sum(sz["wh"]    for sz in szs)
             total_all = sum(sz["total"] for sz in szs)
-        md_rows = _md_row(nm, dos, sale_7d, daily_avg, total_wh, total_all, "")
+        md_rows = _md_row(nm, dos, sale_7d, daily_avg, total_wh, total_all, "", brand_cd)
 
     md_table = (
         '<table style="border-collapse:collapse;width:100%;font-size:13px;">'
@@ -969,11 +993,12 @@ def build_action_guide(alert: dict, stock_info) -> str:
         items    = _stock_items(stock_info) if not stock_info.get("colors") else stock_info["colors"]
         total_wh = sum(s["wh"] for s in items)
         dos      = stock_info.get("days_of_supply")
+        cutoffs  = _dos_cutoffs(stock_info.get("brand_cd", "M"))
         if total_wh == 0:
             stock_warn = "🚨 온라인 물류창고 재고 없음 → 광고 중단 후 자사몰 물류 이동 필요"
-        elif dos is not None and dos < 7:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
+        elif dos is not None and dos < cutoffs["urgent"]:
             stock_warn = f"⚠️ 재고 {int(dos)}일치 — 자사몰 물류 즉시 보충 필수"
-        elif dos is not None and dos < 14:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
+        elif dos is not None and dos < cutoffs["warning"]:
             stock_warn = f"⚠️ 재고 {int(dos)}일치 — 자사몰로 물류 이동 검토"
 
     # ── ② 소재 액션 ──
@@ -1009,7 +1034,7 @@ def build_action_guide(alert: dict, stock_info) -> str:
     stock_urgent = no_stock or (
         stock_info and not isinstance(stock_info, list)
         and stock_info.get("days_of_supply") is not None
-        and stock_info["days_of_supply"] < 7   # TODO(per-brand): MLB 성인/키즈 재산출 대상
+        and stock_info["days_of_supply"] < _dos_cutoffs(stock_info.get("brand_cd", "M"))["urgent"]
     )
     off_action = "광고 OFF 검토" if stock_urgent else ""
 
@@ -1869,7 +1894,7 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
                 stock_items = []
                 for pc, cc in product_codes:
                     print(f"  [재고조회] brand={cfg['brand']} stock_brand_cd={cfg['stock_brand_cd']} part={pc} color={cc or '-'}")
-                    info = fetch_stock_info(pc, cc, cfg["stock_brand_cd"])
+                    info = fetch_stock_info(pc, cc, cfg["stock_brand_cd"], cfg["jasamol_shop_id"])
                     if info:
                         stock_items.append(info)
                     else:
