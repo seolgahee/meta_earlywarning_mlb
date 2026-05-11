@@ -182,6 +182,37 @@ def _dos_cutoffs(brand_cd: str) -> dict:
     return DOS_CUTOFFS.get(brand_cd, DOS_CUTOFF_DEFAULT)
 
 
+def _o2o_signal(online_dos, offline_stock: int, online_daily_avg: float, brand_cd: str):
+    """온라인 부족 + 오프라인 적체 시 'URGENT'/'SUGGEST' 반환, 아니면 None.
+    offline_dos는 '매장재고 / 자사몰 일평균'으로 환산한 일수.
+    """
+    if online_dos is None or online_daily_avg <= 0 or offline_stock <= 0:
+        return None
+    cutoffs = _dos_cutoffs(brand_cd)
+    offline_dos = offline_stock / online_daily_avg
+    if online_dos < cutoffs["urgent"] and offline_dos > O2O_OFFLINE_DOS_URGENT:
+        return "URGENT"
+    if online_dos < cutoffs["warning"] and offline_dos > O2O_OFFLINE_DOS_SUGGEST:
+        return "SUGGEST"
+    return None
+
+
+# O2O 재배치 신호 — 오프라인 잉여재고 환산 일수 기준
+# offline_dos = (전체 매장 재고) / 자사몰 일평균
+# URGENT: 온라인 < urgent AND 오프라인 환산 > 14일 (= 매장 재고만으로 자사몰 2주 운영 가능)
+# SUGGEST: 온라인 < warning AND 오프라인 환산 > 7일
+O2O_OFFLINE_DOS_URGENT  = 14
+O2O_OFFLINE_DOS_SUGGEST = 7
+
+# 매장 유형 분류 (DB_SHOP.ANLYS_DIST_TYPE_CD → 표시명)
+SHOP_TYPE_MAP = {
+    "AX": "백화점",   # 백화점(대형)
+    "AS": "백화점",   # 백화점(중소)
+    "S2": "대리점",   # 가두(대리)
+    "S1": "직영점",   # 가두(직영)
+}
+
+
 # ─────────────────────────────────────────
 # 유틸
 # ─────────────────────────────────────────
@@ -315,6 +346,37 @@ def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str, jasamol_s
         sale_row = cursor.fetchone()
         sale_7d   = int(sale_row[0] or 0) if sale_row else 0
         daily_avg = round(sale_7d / 7, 1)
+
+        # 매장 유형별 7일 판매 (백화점 AX+AS / 대리점 S2 / 직영점 S1)
+        offline_filter = "AND COLOR_CD = %s" if color_cd else ""
+        offline_params = [stock_brand_cd, part_cd] + ([color_cd] if color_cd else [])
+        cursor.execute(f"""
+            SELECT shop_type,
+                   COUNT(DISTINCT shop_id)        AS shops,
+                   SUM(net_qty)                   AS sale_7d
+            FROM (
+                SELECT d.SHOP_ID AS shop_id,
+                       (d.SALE_NML_QTY - d.SALE_RET_QTY) AS net_qty,
+                       CASE WHEN s.ANLYS_DIST_TYPE_CD IN ('AX','AS') THEN '백화점'
+                            WHEN s.ANLYS_DIST_TYPE_CD = 'S2'         THEN '대리점'
+                            WHEN s.ANLYS_DIST_TYPE_CD = 'S1'         THEN '직영점'
+                            ELSE '기타' END AS shop_type
+                FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SH_SCS_D d
+                JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SHOP s
+                  ON s.BRD_CD = d.BRD_CD AND s.SHOP_ID = d.SHOP_ID
+                WHERE d.BRD_CD = %s AND d.PART_CD = %s
+                  {offline_filter}
+                  AND d.DT >= CURRENT_DATE - 7 AND d.DT < CURRENT_DATE
+                  AND s.ANLYS_DIST_TYPE_CD IN ('AX','AS','S2','S1')
+            )
+            GROUP BY shop_type
+        """, offline_params)
+        offline_rows = cursor.fetchall()
+        offline_sales = {
+            r[0]: {"shops": int(r[1] or 0), "sale_7d": int(r[2] or 0),
+                   "daily_avg": round((r[2] or 0) / 7, 1)}
+            for r in offline_rows
+        }
         conn.close()
 
         if not stock_rows:
@@ -328,8 +390,11 @@ def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str, jasamol_s
             # 사이즈별
             sizes = [{"size": r[0], "wh": int(r[1] or 0), "total": int(r[2] or 0)} for r in stock_rows]
             sizes.sort(key=lambda x: _SIZE_ORDER.get(x["size"], 99))
-            total_wh = sum(s["wh"] for s in sizes)
+            total_wh    = sum(s["wh"] for s in sizes)
+            total_all   = sum(s["total"] for s in sizes)
+            offline_stock = max(total_all - total_wh, 0)
             days_of_supply = round(total_wh / daily_avg, 0) if daily_avg > 0 else None
+            o2o_signal     = _o2o_signal(days_of_supply, offline_stock, daily_avg, stock_brand_cd)
             return {
                 "prdt_nm":        prdt_nm,
                 "brand_cd":       stock_brand_cd,
@@ -338,12 +403,18 @@ def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str, jasamol_s
                 "sale_7d":        sale_7d,
                 "daily_avg":      daily_avg,
                 "days_of_supply": days_of_supply,
+                "offline_stock":  offline_stock,
+                "offline_sales":  offline_sales,
+                "o2o_signal":     o2o_signal,
             }
         else:
             # 컬러별
             colors = [{"color": r[0], "wh": int(r[1] or 0), "total": int(r[2] or 0)} for r in stock_rows]
-            total_wh = sum(c["wh"] for c in colors)
+            total_wh    = sum(c["wh"] for c in colors)
+            total_all   = sum(c["total"] for c in colors)
+            offline_stock = max(total_all - total_wh, 0)
             days_of_supply = round(total_wh / daily_avg, 0) if daily_avg > 0 else None
+            o2o_signal     = _o2o_signal(days_of_supply, offline_stock, daily_avg, stock_brand_cd)
             return {
                 "prdt_nm":        prdt_nm,
                 "brand_cd":       stock_brand_cd,
@@ -352,6 +423,9 @@ def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str, jasamol_s
                 "sale_7d":        sale_7d,
                 "daily_avg":      daily_avg,
                 "days_of_supply": days_of_supply,
+                "offline_stock":  offline_stock,
+                "offline_sales":  offline_sales,
+                "o2o_signal":     o2o_signal,
             }
     except Exception as e:
         print(f"[경고] 재고 조회 실패 ({part_cd}-{color_cd}): {e}")
@@ -415,17 +489,24 @@ def format_stock_summary(stock_info) -> str:
     dos       = stock_info.get("days_of_supply")
     daily_avg = stock_info.get("daily_avg", 0)
     sale_7d   = stock_info.get("sale_7d", 0)
+    offline   = stock_info.get("offline_stock", 0)
+    o2o       = stock_info.get("o2o_signal")
     cutoffs   = _dos_cutoffs(stock_info.get("brand_cd", "M"))
-    sale_info = f"최근 7일 {sale_7d}개 판매 · 일평균 {daily_avg}개" if sale_7d else "판매 데이터 없음"
+    sale_info = f"자사몰 7일 {sale_7d}개 · 일평균 {daily_avg}개" if sale_7d else "자사몰 판매 없음"
+    offline_info = f"매장 합 {offline:,}개" if offline else "매장 재고 없음"
     if total_wh == 0:
-        guide = f"물류창고 소진 · 광고 중단 검토 · {sale_info}"
+        guide = f"물류창고 소진 · 광고 중단 검토 · {sale_info} · {offline_info}"
+    elif o2o == "URGENT":
+        guide = f"🔄[재배치 시급] 온라인 ~{int(dos)}일치 · {offline_info} 적체 · 매장→자사몰 즉시 이동 · {sale_info}"
+    elif o2o == "SUGGEST":
+        guide = f"🔄[재배치 권장] 온라인 ~{int(dos)}일치 · {offline_info} 여유 · 매장→자사몰 이동 검토 · {sale_info}"
     elif dos is not None and dos < cutoffs["urgent"]:
-        guide = f"~{int(dos)}일치 · 단기 소진 예상 · 자사몰 물류 즉시 보충 필요 · {sale_info}"
+        guide = f"~{int(dos)}일치 · 단기 소진 예상 · 자사몰 물류 즉시 보충 필요 · {sale_info} · {offline_info}"
     elif dos is not None and dos < cutoffs["warning"]:
-        guide = f"~{int(dos)}일치 · 2주 내외 소진 예상 · 자사몰로 물류 이동 검토 · {sale_info}"
+        guide = f"~{int(dos)}일치 · 2주 내외 소진 예상 · 자사몰로 물류 이동 검토 · {sale_info} · {offline_info}"
     else:
         dos_str = f"~{int(dos)}일치" if dos else "판매 없음"
-        guide = f"재고 여유 · {dos_str} · 일cap 상향 검토 가능 · {sale_info}"
+        guide = f"재고 여유 · {dos_str} · 일cap 상향 검토 가능 · {sale_info} · {offline_info}"
     return f"{prefix}물류창고 {total_wh:,}개 · {guide}"
 
 
@@ -434,18 +515,27 @@ def format_stock_md_guide(stock_info) -> str:
     if not stock_info:
         return ""
     # 멀티 상품 리스트인 경우 상품별 컬러/재고 + 액션 가이드
-    def _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd):
-        sale_info = f"자사몰 최근 7일 판매 {sale_7d}개 · 일평균 {daily_avg}개" if sale_7d else "판매 데이터 없음"
+    def _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd, offline_stock=0, o2o=None, offline_sales=None):
+        sale_info = f"자사몰 7일 {sale_7d}개 · 일평균 {daily_avg}개" if sale_7d else "자사몰 판매 없음"
+        offline_breakdown = ""
+        if offline_sales:
+            parts = [f"{k}({v['shops']}점) 일평균 {v['daily_avg']}개"
+                     for k, v in offline_sales.items() if v.get('daily_avg', 0) > 0]
+            if parts:
+                offline_breakdown = " | " + " / ".join(parts)
         cutoffs = _dos_cutoffs(brand_cd)
         if total_wh == 0:
-            return f"[즉시] 온라인 물류창고 재고 없음 (매장 재고 {total_all}개) → 광고 전환 대응 불가, 자사몰로 즉시 물류 이동 필요"
-        elif dos is not None and dos < cutoffs["urgent"]:
-            return f"[긴급] ~{int(dos)}일치, {sale_info} → 광고 전환 증가 예상, 자사몰 물류 즉시 보충 필수"
-        elif dos is not None and dos < cutoffs["warning"]:
-            return f"[주의] ~{int(dos)}일치, {sale_info} → 전환 지속 시 단기 소진 예상, 자사몰로 물류 이동 검토"
-        else:
-            dos_str = f"~{int(dos)}일치" if dos else "판매 없음"
-            return f"[안정] {dos_str}, {sale_info} → 광고 지속 운영 가능"
+            return f"[즉시] 온라인 물류창고 재고 없음 (매장 재고 {total_all}개) → 광고 전환 대응 불가, 자사몰로 즉시 물류 이동 필요{offline_breakdown}"
+        if o2o == "URGENT":
+            return f"🔄[재배치 시급] 온라인 ~{int(dos)}일치 · 매장 합 {offline_stock:,}개 적체 → 매장→자사몰 즉시 이동 ({sale_info}){offline_breakdown}"
+        if o2o == "SUGGEST":
+            return f"🔄[재배치 권장] 온라인 ~{int(dos)}일치 · 매장 합 {offline_stock:,}개 여유 → 매장→자사몰 이동 검토 ({sale_info}){offline_breakdown}"
+        if dos is not None and dos < cutoffs["urgent"]:
+            return f"[긴급] ~{int(dos)}일치, {sale_info} → 자사몰 물류 즉시 보충 필수{offline_breakdown}"
+        if dos is not None and dos < cutoffs["warning"]:
+            return f"[주의] ~{int(dos)}일치, {sale_info} → 자사몰로 물류 이동 검토{offline_breakdown}"
+        dos_str = f"~{int(dos)}일치" if dos else "판매 없음"
+        return f"[안정] {dos_str}, {sale_info} → 광고 지속 운영 가능{offline_breakdown}"
 
     if isinstance(stock_info, list):
         lines = []
@@ -455,16 +545,19 @@ def format_stock_md_guide(stock_info) -> str:
             sale_7d   = s.get("sale_7d", 0)
             daily_avg = s.get("daily_avg", 0)
             brand_cd  = s.get("brand_cd", "M")
+            offline_stock = s.get("offline_stock", 0)
+            o2o           = s.get("o2o_signal")
+            offline_sales = s.get("offline_sales")
             if s.get("colors") is not None:
                 total_wh   = sum(c["wh"] for c in s["colors"])
                 total_all  = sum(c["total"] for c in s["colors"])
-                action = _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd)
+                action = _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd, offline_stock, o2o, offline_sales)
                 lines.append(f"{nm}: {action}")
             else:
                 szs       = _stock_items(s)
                 total_wh  = sum(sz["wh"] for sz in szs)
                 total_all = sum(sz["total"] for sz in szs)
-                action = _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd)
+                action = _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd, offline_stock, o2o, offline_sales)
                 lines.append(f"{nm}: {action}")
         return "\n".join(lines)
 
@@ -474,11 +567,14 @@ def format_stock_md_guide(stock_info) -> str:
     sale_7d   = stock_info.get("sale_7d", 0)
     daily_avg = stock_info.get("daily_avg", 0)
     brand_cd  = stock_info.get("brand_cd", "M")
+    offline_stock = stock_info.get("offline_stock", 0)
+    o2o           = stock_info.get("o2o_signal")
+    offline_sales = stock_info.get("offline_sales")
 
     # 컬러별 데이터인 경우 (color_cd 없이 조회된 단일 상품) — 색상별 재고는 재고 현황에 표시되므로 액션만 출력
     if stock_info.get("colors") is not None:
         total_all  = sum(c["total"] for c in stock_info["colors"])
-        action = _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd)
+        action = _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd, offline_stock, o2o, offline_sales)
         return action
 
     sizes = items
@@ -499,7 +595,7 @@ def format_stock_md_guide(stock_info) -> str:
 
     total_all     = sum(s["total"] for s in sizes)
     zero_wh_sizes = [s["size"] for s in sizes if s["wh"] == 0 and s["total"] > 0]
-    action = _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd)
+    action = _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd, offline_stock, o2o, offline_sales)
 
     if zero_wh_sizes:
         action += f" | {', '.join(zero_wh_sizes)} 물류창고 재고 없음 주의"
@@ -994,9 +1090,15 @@ def build_action_guide(alert: dict, stock_info) -> str:
         items    = _stock_items(stock_info) if not stock_info.get("colors") else stock_info["colors"]
         total_wh = sum(s["wh"] for s in items)
         dos      = stock_info.get("days_of_supply")
+        offline  = stock_info.get("offline_stock", 0)
+        o2o      = stock_info.get("o2o_signal")
         cutoffs  = _dos_cutoffs(stock_info.get("brand_cd", "M"))
         if total_wh == 0:
             stock_warn = "🚨 온라인 물류창고 재고 없음 → 광고 중단 후 자사몰 물류 이동 필요"
+        elif o2o == "URGENT":
+            stock_warn = f"🔄 [재배치 시급] 온라인 {int(dos)}일치 · 매장 합 {offline:,}개 적체 → 매장→자사몰 즉시 이동"
+        elif o2o == "SUGGEST":
+            stock_warn = f"🔄 [재배치 권장] 온라인 {int(dos)}일치 · 매장 합 {offline:,}개 여유 → 매장→자사몰 이동 검토"
         elif dos is not None and dos < cutoffs["urgent"]:
             stock_warn = f"⚠️ 재고 {int(dos)}일치 — 자사몰 물류 즉시 보충 필수"
         elif dos is not None and dos < cutoffs["warning"]:
