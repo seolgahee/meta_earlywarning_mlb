@@ -638,9 +638,13 @@ def build_stock_html(stock_info) -> str:
     TD_OR = 'style="padding:6px 10px;border:1px solid #ffe0b2;font-size:12px;color:#333;text-align:right;"'
     ROW_ALT_O = 'style="background:#fff8f0;"'
 
-    def _action_text(total_wh, total_all, dos, brand_cd):
+    def _action_text(total_wh, total_all, dos, brand_cd, offline_stock=0, o2o=None):
         if total_wh == 0:
             return f"물류창고 재고 없음 (매장 {total_all:,}개) → 즉시 물류 이동 필요"
+        if o2o == "URGENT":
+            return f"🔄 [재배치 시급] 매장 {offline_stock:,}개 적체 → 매장→자사몰 즉시 이동"
+        if o2o == "SUGGEST":
+            return f"🔄 [재배치 권장] 매장 {offline_stock:,}개 여유 → 매장→자사몰 이동 검토"
         cutoffs = _dos_cutoffs(brand_cd)
         if dos is not None and dos < cutoffs["urgent"]:
             return "광고 전환 증가 예상 → 자사몰 물류 즉시 보충 필수"
@@ -648,6 +652,17 @@ def build_stock_html(stock_info) -> str:
             return "단기 소진 예상 → 자사몰 물류 이동 검토"
         else:
             return "광고 지속 운영 가능"
+
+    def _offline_breakdown(offline_sales):
+        """매장 유형별 일평균을 한 셀에 표시: '백 43 / 대 19 / 직 20'."""
+        if not offline_sales:
+            return "-"
+        parts = []
+        for key, short in [("백화점", "백"), ("대리점", "대"), ("직영점", "직")]:
+            v = offline_sales.get(key)
+            if v and v.get("daily_avg", 0) > 0:
+                parts.append(f"{short} {v['daily_avg']:.1f}({v['shops']}점)")
+        return " / ".join(parts) if parts else "-"
 
     def _badge(status, color):
         return (
@@ -721,18 +736,21 @@ def build_stock_html(stock_info) -> str:
         f'<th {TH_ORG}>상품명</th>'
         f'<th {TH_ORG_C}>상태</th>'
         f'<th {TH_ORG_R}>재고일수</th>'
-        f'<th {TH_ORG_R}>7일 판매</th>'
-        f'<th {TH_ORG_R}>일평균</th>'
+        f'<th {TH_ORG_R}>자사몰<br/>7일 판매</th>'
+        f'<th {TH_ORG_R}>자사몰<br/>일평균</th>'
+        f'<th {TH_ORG}>매장 일평균<br/>(백/대/직)</th>'
         f'<th {TH_ORG}>액션</th>'
         f'</tr></thead>'
     )
 
-    def _md_row(nm, dos, sale_7d, daily_avg, total_wh, total_all, bg, brand_cd):
+    def _md_row(nm, dos, sale_7d, daily_avg, total_wh, total_all, bg, brand_cd,
+                offline_stock=0, o2o=None, offline_sales=None):
         status, color = _status_badge_info(dos, total_wh, brand_cd)
         dos_str  = f"~{int(dos)}일" if dos else "-"
         sale_str = f"{int(sale_7d):,}개"  if sale_7d  else "-"
         avg_str  = f"{daily_avg:.1f}개"   if daily_avg else "-"
-        action   = _action_text(total_wh, total_all, dos, brand_cd)
+        offline_cell = _offline_breakdown(offline_sales)
+        action   = _action_text(total_wh, total_all, dos, brand_cd, offline_stock, o2o)
         return (
             f'<tr {bg}>'
             f'<td {TD_O}>{nm}</td>'
@@ -740,6 +758,7 @@ def build_stock_html(stock_info) -> str:
             f'<td {TD_OR}>{dos_str}</td>'
             f'<td {TD_OR}>{sale_str}</td>'
             f'<td {TD_OR}>{avg_str}</td>'
+            f'<td {TD_O}>{offline_cell}</td>'
             f'<td {TD_O}>{action}</td>'
             f'</tr>'
         )
@@ -752,6 +771,9 @@ def build_stock_html(stock_info) -> str:
             sale_7d   = s.get("sale_7d", 0)
             daily_avg = s.get("daily_avg", 0)
             brand_cd  = s.get("brand_cd", "M")
+            offline_stock = s.get("offline_stock", 0)
+            o2o           = s.get("o2o_signal")
+            offline_sales = s.get("offline_sales")
             if s.get("colors") is not None:
                 total_wh  = sum(c["wh"]    for c in s["colors"])
                 total_all = sum(c["total"] for c in s["colors"])
@@ -760,12 +782,16 @@ def build_stock_html(stock_info) -> str:
                 total_wh  = sum(sz["wh"]    for sz in szs)
                 total_all = sum(sz["total"] for sz in szs)
             bg = ROW_ALT_O if i % 2 == 1 else ""
-            md_rows += _md_row(nm, dos, sale_7d, daily_avg, total_wh, total_all, bg, brand_cd)
+            md_rows += _md_row(nm, dos, sale_7d, daily_avg, total_wh, total_all, bg, brand_cd,
+                               offline_stock, o2o, offline_sales)
     else:
         dos       = stock_info.get("days_of_supply")
         sale_7d   = stock_info.get("sale_7d", 0)
         daily_avg = stock_info.get("daily_avg", 0)
         brand_cd  = stock_info.get("brand_cd", "M")
+        offline_stock = stock_info.get("offline_stock", 0)
+        o2o           = stock_info.get("o2o_signal")
+        offline_sales = stock_info.get("offline_sales")
         nm        = stock_info.get("prdt_nm", "") or ""
         if stock_info.get("colors") is not None:
             total_wh  = sum(c["wh"]    for c in stock_info["colors"])
@@ -774,7 +800,8 @@ def build_stock_html(stock_info) -> str:
             szs       = _stock_items(stock_info)
             total_wh  = sum(sz["wh"]    for sz in szs)
             total_all = sum(sz["total"] for sz in szs)
-        md_rows = _md_row(nm, dos, sale_7d, daily_avg, total_wh, total_all, "", brand_cd)
+        md_rows = _md_row(nm, dos, sale_7d, daily_avg, total_wh, total_all, "", brand_cd,
+                          offline_stock, o2o, offline_sales)
 
     md_table = (
         '<table style="border-collapse:collapse;width:100%;font-size:13px;">'
