@@ -168,11 +168,12 @@ KILL_CONDITION = {
     "spend_12h_min": 150_000,         # TODO(per-brand): MLB 성인/키즈 재산출 대상
 }
 
-# 재고 일수(DoS) 컷오프 — 자사몰 일평균 판매 회전 차이 반영
+# 재고 일수(DoS) 컷오프 — 과거 30일 정확도 시뮬레이션 기반 (Precision 최적)
+# 성인: 보충 변동성 큼 → 짧은 컷오프로 진짜 위급만 / 키즈: 더 예측 가능 → 약간 여유
 # urgent: 광고 OFF/즉시 보충, warning: 물류 이동 검토
 DOS_CUTOFFS = {
-    "M": {"urgent": 5,  "warning": 10},   # MLB 성인 (일판매 평균 1.5개, 회전 느림)
-    "I": {"urgent": 7,  "warning": 14},   # MLB 키즈 (일판매 평균 2.1개)
+    "M": {"urgent": 3,  "warning": 7},    # MLB 성인 (X<3 Precision 32.5%)
+    "I": {"urgent": 5,  "warning": 10},   # MLB 키즈 (X<5 Precision 30.5%)
 }
 DOS_CUTOFF_DEFAULT = {"urgent": 7, "warning": 14}
 
