@@ -40,41 +40,6 @@ jobs:
           restore-keys: |
             alert-log-
 
-      - name: Debug Snowflake credentials
-        env:
-          SNOWFLAKE_ACCOUNT:       ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USER:          ${{ secrets.SNOWFLAKE_USER }}
-          SNOWFLAKE_PRIVATE_KEY:   ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
-        run: |
-          pip install cryptography
-          python << 'PYEOF'
-          import os, base64, hashlib
-          from cryptography.hazmat.primitives.serialization import load_pem_private_key, Encoding, PublicFormat
-
-          user = os.environ.get('SNOWFLAKE_USER', '')
-          account = os.environ.get('SNOWFLAKE_ACCOUNT', '')
-          pem_str = os.environ.get('SNOWFLAKE_PRIVATE_KEY', '')
-
-          print(f"USER repr: {user!r} (len={len(user)})")
-          print(f"ACCOUNT len: {len(account)}")
-          print(f"PEM length: {len(pem_str)}")
-          print(f"PEM first 30: {pem_str[:30]!r}")
-          print(f"PEM last 30: {pem_str[-30:]!r}")
-          print(f"BEGIN marker present: {'-----BEGIN PRIVATE KEY-----' in pem_str}")
-          print(f"END marker present: {'-----END PRIVATE KEY-----' in pem_str}")
-          print(f"Newline count: {pem_str.count(chr(10))}")
-          print(f"Has literal backslash-n: {'\\n' in pem_str}")
-
-          pem = pem_str.replace("\\n", "\n").encode()
-          try:
-              key = load_pem_private_key(pem, password=None)
-              pub = key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
-              fp = base64.b64encode(hashlib.sha256(pub).digest()).decode()
-              print(f"FINGERPRINT: SHA256:{fp}")
-          except Exception as e:
-              print(f"PARSE ERROR: {type(e).__name__}: {e}")
-          PYEOF
-
       - name: Run Meta Alert
         env:
           META_ACCESS_TOKEN:       ${{ secrets.META_ACCESS_TOKEN }}
