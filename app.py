@@ -214,24 +214,14 @@ def extract_purchase_revenue(action_values: list) -> float:
 
 def extract_product_code(ad_name: str) -> tuple[str, str] | tuple[None, None]:
     """
-    소재명에서 PART_CD-COLOR_CD 또는 PART_CD 목록 추출.
-    - 단일: '..._TWSK16063-WHS' → [('TWSK16063', 'WHS')]
-    - 멀티: '..._TWWJ20863_TWSP20853_TWMT10361' → [('TWWJ20863', None), ...]
-    결과 없으면 빈 리스트.
+    소재명에서 MLB 품번 목록 추출. 컬러는 DB에 별도 컬럼이라 None 처리.
+    MLB 품번 패턴: [3 또는 7] + 영문3~5 + 숫자3~4 + 영문0~1
+      성인: 3으로 시작 (예: 3ACPB245N, 3FTSB0263)
+      키즈: 7으로 시작 (예: 7ARNCB063)
     """
-    # 우선 PART_CD-COLOR_CD 패턴 시도
-    match = re.search(r'_([A-Z0-9]+-[A-Z]+)$', ad_name)
-    if match:
-        code = match.group(1)
-        parts = code.split('-', 1)
-        if len(parts) == 2:
-            return [(parts[0], parts[1])]
-
-    # 품번만 있는 패턴: _로 구분된 영문4자+숫자4~5자 형태
-    codes = re.findall(r'(?:^|_)([A-Z]{4}\d{4,5}[A-Z0-9]{0,2})(?=_|$)', ad_name)
+    codes = re.findall(r'(?:^|[-_])([37][A-Z]{3,5}\d{3,4}[A-Z]?)(?=[-_]|$)', ad_name)
     if codes:
         return [(c, None) for c in codes]
-
     return []
 
 
