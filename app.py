@@ -127,6 +127,31 @@ def check_operating_hours() -> None:
     print(f"[정보] 운영 시간 확인 완료 (현재 KST: {kst_now.strftime('%Y-%m-%d %H:%M')})")
 
 
+def check_recent_snapshot_skip(window_minutes: int = 30) -> None:
+    """직전 window_minutes 내 MLB 적재 있으면 종료.
+    GitHub cron + cron-job.org 동시 trigger 시 정각 중복 실행/알럿 방지.
+    """
+    if not all([SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER,
+                (SNOWFLAKE_PRIVATE_KEY or SNOWFLAKE_PRIVATE_KEY_PATH)]):
+        return
+    try:
+        conn = get_snowflake_conn()
+        cur  = conn.cursor()
+        cur.execute(f"""
+            SELECT MAX(SNAPSHOT_TS)
+            FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_SCHEMA}.{SNOWFLAKE_TABLE}
+            WHERE BRAND IN ('MLB','MLB_KIDS')
+              AND SNAPSHOT_TS >= DATEADD(minute, -{window_minutes}, CURRENT_TIMESTAMP)
+        """)
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0]:
+            print(f"[종료] {window_minutes}분 내 이미 적재됨 (최근 SNAPSHOT_TS={row[0]}). 중복 실행 방지.")
+            exit(0)
+    except Exception as e:
+        print(f"[경고] 최근 적재 체크 실패 (계속 진행): {e}")
+
+
 # ─────────────────────────────────────────
 # Alert 조건 (운영 기준)
 # ─────────────────────────────────────────
@@ -2179,6 +2204,7 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
 # ─────────────────────────────────────────
 if __name__ == "__main__":
     check_operating_hours()
+    check_recent_snapshot_skip()
     raw_data = fetch_insights()
     if not raw_data:
         print("[결과] 데이터 없음. 오늘 활성 광고가 없거나 API 오류.")
