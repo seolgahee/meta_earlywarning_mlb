@@ -1642,18 +1642,44 @@ def send_slack_alert(alerts: list, cfg: dict) -> None:
 # ─────────────────────────────────────────
 # Meta API 호출
 # ─────────────────────────────────────────
+def _resolve_image_hash(image_hash: str) -> str:
+    """image_hash → /adimages 원본 CDN URL. 실패 시 빈 문자열.
+
+    Graph API 의 `hashes` 파라미터는 JSON 배열 문자열로 전달해야 함.
+    """
+    try:
+        r = requests.get(
+            f"https://graph.facebook.com/{API_VERSION}/{AD_ACCOUNT_ID}/adimages",
+            params={"access_token": ACCESS_TOKEN,
+                    "hashes": json.dumps([image_hash]),
+                    "fields": "url,permalink_url"},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json().get("data", [])
+            if data:
+                return data[0].get("url") or data[0].get("permalink_url") or ""
+    except Exception:
+        pass
+    return ""
+
+
 def fetch_creative_image(ad_id: str) -> str:
     """
     ad_id 기준으로 소재 이미지 URL 반환.
-    우선순위: image_url > object_story_id.full_picture > image_hash → adimages.url > thumbnail_url
-    조회 실패 또는 이미지 없으면 빈 문자열 반환.
+    우선순위:
+      1) image_url (원본 고화질)
+      2) object_story_id.full_picture (파트너십/인플루언서 IG 포스트 원본)
+      3) image_hash → adimages.url (단일 이미지 광고)
+      4) asset_feed_spec.images[].hash → adimages.url (ASC Dynamic Creative)
+      5) thumbnail_url (저해상도, p64x64 같은 64px 썸네일이라 슬랙에서 작게 표시됨)
     """
     try:
         resp = requests.get(
             f"https://graph.facebook.com/{API_VERSION}/{ad_id}",
             params={
                 "access_token": ACCESS_TOKEN,
-                "fields": "creative{thumbnail_url,image_url,image_hash,object_story_id}",
+                "fields": "creative{thumbnail_url,image_url,image_hash,object_story_id,asset_feed_spec}",
             },
             timeout=10,
         )
@@ -1661,11 +1687,11 @@ def fetch_creative_image(ad_id: str) -> str:
             return ""
         creative = resp.json().get("creative", {})
 
-        # image_url이 원본 고화질이므로 최우선
+        # 1) image_url이 원본 고화질이므로 최우선
         if creative.get("image_url"):
             return creative["image_url"]
 
-        # 파트너십(인플루언서) 소재: object_story_id로 인스타그램 포스팅 원본 이미지 조회
+        # 2) 파트너십(인플루언서) 소재: object_story_id로 인스타그램 포스팅 원본 이미지 조회
         object_story_id = creative.get("object_story_id")
         if object_story_id:
             post_resp = requests.get(
@@ -1681,24 +1707,25 @@ def fetch_creative_image(ad_id: str) -> str:
                 if full_picture:
                     return full_picture
 
-        # image_hash → adimages.url (원본 CDN 링크, thumbnail보다 고화질)
+        # 3) image_hash → adimages.url (단일 이미지 광고)
         image_hash = creative.get("image_hash")
         if image_hash:
-            img_resp = requests.get(
-                f"https://graph.facebook.com/{API_VERSION}/{AD_ACCOUNT_ID}/adimages",
-                params={
-                    "access_token": ACCESS_TOKEN,
-                    "hashes": image_hash,
-                    "fields": "url,permalink_url",
-                },
-                timeout=10,
-            )
-            if img_resp.status_code == 200:
-                data = img_resp.json().get("data", [])
-                if data:
-                    return data[0].get("url") or data[0].get("permalink_url") or ""
+            url = _resolve_image_hash(image_hash)
+            if url:
+                return url
 
-        # 최후 fallback: thumbnail_url (저해상도 프리뷰)
+        # 4) ASC Dynamic Creative: asset_feed_spec.images[].hash 첫 항목으로 시도
+        afs = creative.get("asset_feed_spec") or {}
+        for img in (afs.get("images") or []):
+            h = img.get("hash")
+            if not h:
+                continue
+            url = _resolve_image_hash(h)
+            if url:
+                return url
+            break  # 첫 hash 실패 시 다음 폴백으로
+
+        # 5) 최후 fallback: thumbnail_url (저해상도, p64x64 = 64px)
         if creative.get("thumbnail_url"):
             return creative["thumbnail_url"]
 
