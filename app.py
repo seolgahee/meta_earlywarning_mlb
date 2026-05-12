@@ -1668,18 +1668,22 @@ def fetch_creative_image(ad_id: str) -> str:
     """
     ad_id 기준으로 소재 이미지 URL 반환.
     우선순위:
-      1) image_url (원본 고화질)
+      1) image_url
       2) object_story_id.full_picture (파트너십/인플루언서 IG 포스트 원본)
       3) image_hash → adimages.url (단일 이미지 광고)
-      4) asset_feed_spec.images[].hash → adimages.url (ASC Dynamic Creative)
-      5) thumbnail_url (저해상도, p64x64 같은 64px 썸네일이라 슬랙에서 작게 표시됨)
+      4) object_story_spec.video_data.image_hash → adimages.url (영상 광고 썸네일)
+         또는 .link_data.image_hash (단일 이미지 광고의 다른 케이스)
+      5) asset_feed_spec.images[].hash → adimages.url (ASC Dynamic 이미지)
+         또는 asset_feed_spec.videos[].thumbnail_hash (ASC Dynamic 영상)
+      6) object_story_spec.video_data.image_url (영상 광고 raw URL)
+      7) thumbnail_url (최후, p64x64 = 64px 강제 리사이즈 → 슬랙에서 작게 표시)
     """
     try:
         resp = requests.get(
             f"https://graph.facebook.com/{API_VERSION}/{ad_id}",
             params={
                 "access_token": ACCESS_TOKEN,
-                "fields": "creative{thumbnail_url,image_url,image_hash,object_story_id,asset_feed_spec}",
+                "fields": "creative{thumbnail_url,image_url,image_hash,object_story_id,object_story_spec,asset_feed_spec}",
             },
             timeout=10,
         )
@@ -1714,18 +1718,39 @@ def fetch_creative_image(ad_id: str) -> str:
             if url:
                 return url
 
-        # 4) ASC Dynamic Creative: asset_feed_spec.images[].hash 첫 항목으로 시도
+        # 4) object_story_spec.{video_data|link_data}.image_hash
+        oss = creative.get("object_story_spec") or {}
+        for key in ("video_data", "link_data"):
+            data = oss.get(key) or {}
+            h = data.get("image_hash")
+            if h:
+                url = _resolve_image_hash(h)
+                if url:
+                    return url
+
+        # 5) asset_feed_spec.images[].hash / .videos[].thumbnail_hash (ASC Dynamic)
         afs = creative.get("asset_feed_spec") or {}
         for img in (afs.get("images") or []):
             h = img.get("hash")
-            if not h:
-                continue
-            url = _resolve_image_hash(h)
-            if url:
-                return url
-            break  # 첫 hash 실패 시 다음 폴백으로
+            if h:
+                url = _resolve_image_hash(h)
+                if url:
+                    return url
+                break
+        for vid in (afs.get("videos") or []):
+            h = vid.get("thumbnail_hash")
+            if h:
+                url = _resolve_image_hash(h)
+                if url:
+                    return url
+                break
 
-        # 5) 최후 fallback: thumbnail_url (저해상도, p64x64 = 64px)
+        # 6) video_data.image_url (영상 광고가 직접 노출한 썸네일 URL)
+        vd_image_url = (oss.get("video_data") or {}).get("image_url")
+        if vd_image_url:
+            return vd_image_url
+
+        # 7) 최후 fallback: thumbnail_url (저해상도, p64x64 = 64px)
         if creative.get("thumbnail_url"):
             return creative["thumbnail_url"]
 
