@@ -61,7 +61,8 @@ BRAND_CONFIGS = [
         "brand":            "MLB",
         "campaign_token":   "M",
         "stock_brand_cd":   "M",
-        "jasamol_shop_id":  "510",     # (주)에프앤에프 MLB 성인 자사몰
+        "jasamol_shop_id":  "510",     # (주)에프앤에프 MLB 성인 자사몰 (판매 집계용, 재고는 매대 0)
+        "ec_logistics_shop_id": "9001",  # EC-온라인물류 (실제 가용재고 보유)
         "slack_webhook":    os.getenv("SLACK_WEBHOOK_URL", ""),
         "alert_recipients": os.getenv("ALERT_RECIPIENTS", ""),
     },
@@ -69,7 +70,8 @@ BRAND_CONFIGS = [
         "brand":            "MLB_KIDS",
         "campaign_token":   "I",
         "stock_brand_cd":   "I",
-        "jasamol_shop_id":  "50002",   # (주)에프앤에프 MLB 키즈 자사몰
+        "jasamol_shop_id":  "50002",   # (주)에프앤에프 MLB 키즈 자사몰 (판매 집계용)
+        "ec_logistics_shop_id": "90007",  # EC-온라인물류 (실제 가용재고 보유)
         "slack_webhook":    os.getenv("SLACK_WEBHOOK_URL_KIDS", ""),
         "alert_recipients": os.getenv("ALERT_RECIPIENTS_KIDS", ""),
     },
@@ -274,15 +276,18 @@ def extract_product_code(ad_name: str) -> tuple[str, str] | tuple[None, None]:
 _SIZE_ORDER = {"XS": 0, "S": 1, "M": 2, "L": 3, "XL": 4, "XXL": 5, "XXXL": 6}
 
 
-def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str, jasamol_shop_id: str) -> dict | None:
+def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str,
+                     jasamol_shop_id: str, ec_logistics_shop_id: str) -> dict | None:
     """
-    DW_SCS_DACUM(물류재고) + DW_SCS_D(금주 온라인 판매) 기반 재고/주치 조회.
+    DB_SH_SCS_STOCK(EC 기준 매장별 재고) + DW_SH_SCS_D(자사몰/오프라인 판매) 기반.
+    - 온라인재고(wh): SHOP_ID = ec_logistics_shop_id (EC-온라인물류) 의 AVAILABLE_STOCK_QTY
+    - 전체재고(total): EC물류 + 오프라인매장(F4) 합산 (자사몰 N1 음수 누계, 외부몰 N2 제외)
     반환: {
         "prdt_nm": "W 하이웨이스트 우븐 플리츠 스커트",
         "is_mc": False,
         "sizes": [{"size": "M", "wh": 5, "total": 12}, ...],
         "weekly_qty": 8,
-        "weeks_of_supply": 1.2,   # 물류재고합 / 금주판매량, None이면 판매 없음
+        "weeks_of_supply": 1.2,
     }
     실패 시 None.
     """
@@ -292,42 +297,50 @@ def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str, jasamol_s
         conn = get_snowflake_conn()
         cursor = conn.cursor()
 
-        # 재고 조회: color_cd 있으면 사이즈별, 없으면 컬러별
-        # 서브쿼리에 PART_CD도 포함 → 해당 상품 기준 최신 날짜 조회 (브랜드 최신 날짜와 다를 수 있음)
+        # 최신 스냅샷 일자 — DT는 보통 단일이지만 안전하게 CURRENT_DATE 이하 MAX
         latest_dt_sub = f"""
-            SELECT MAX(START_DT)
-            FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM
-            WHERE BRD_CD = %s AND PART_CD = %s
+            SELECT MAX(DT)
+            FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SH_SCS_STOCK
+            WHERE DT <= CURRENT_DATE
         """
+        # WHERE 절: EC물류 SHOP 또는 오프라인 매장(F4)만 포함 (자사몰 N1 음수 / 외부몰 N2 제외)
+        shop_filter = "AND (d.SHOP_ID = %s OR sh.ANLYS_DIST_TYPE_CD = 'F4')"
+
         if color_cd:
-            # 단일 컬러 → 사이즈별 물류재고
+            # 단일 컬러 → 사이즈별
             cursor.execute(f"""
                 SELECT d.SIZE_CD,
-                       SUM(d.WH_STOCK_QTY) AS WH_STOCK,
-                       SUM(d.STOCK_QTY)    AS TOTAL_STOCK,
-                       MAX(p.PRDT_NM)      AS PRDT_NM
-                FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM d
+                       SUM(CASE WHEN d.SHOP_ID = %s THEN d.AVAILABLE_STOCK_QTY ELSE 0 END) AS WH_STOCK,
+                       SUM(d.AVAILABLE_STOCK_QTY) AS TOTAL_STOCK,
+                       MAX(p.PRDT_NM)             AS PRDT_NM
+                FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SH_SCS_STOCK d
+                JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SHOP sh
+                  ON sh.BRD_CD = d.BRD_CD AND sh.SHOP_ID = d.SHOP_ID
                 LEFT JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_PRDT p
                   ON d.PRDT_CD = p.PRDT_CD
                 WHERE d.BRD_CD = %s AND d.PART_CD = %s AND d.COLOR_CD = %s
-                  AND d.START_DT = ({latest_dt_sub})
+                  AND d.DT = ({latest_dt_sub})
+                  {shop_filter}
                 GROUP BY d.SIZE_CD
-            """, (stock_brand_cd, part_cd, color_cd, stock_brand_cd, part_cd))
+            """, (ec_logistics_shop_id, stock_brand_cd, part_cd, color_cd, ec_logistics_shop_id))
         else:
-            # 전체 컬러 → 컬러별 물류재고 합산
+            # 전체 컬러 → 컬러별 합산
             cursor.execute(f"""
                 SELECT d.COLOR_CD,
-                       SUM(d.WH_STOCK_QTY) AS WH_STOCK,
-                       SUM(d.STOCK_QTY)    AS TOTAL_STOCK,
-                       MAX(p.PRDT_NM)      AS PRDT_NM
-                FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DW_SCS_DACUM d
+                       SUM(CASE WHEN d.SHOP_ID = %s THEN d.AVAILABLE_STOCK_QTY ELSE 0 END) AS WH_STOCK,
+                       SUM(d.AVAILABLE_STOCK_QTY) AS TOTAL_STOCK,
+                       MAX(p.PRDT_NM)             AS PRDT_NM
+                FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SH_SCS_STOCK d
+                JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SHOP sh
+                  ON sh.BRD_CD = d.BRD_CD AND sh.SHOP_ID = d.SHOP_ID
                 LEFT JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_PRDT p
                   ON d.PRDT_CD = p.PRDT_CD
                 WHERE d.BRD_CD = %s AND d.PART_CD = %s
-                  AND d.START_DT = ({latest_dt_sub})
+                  AND d.DT = ({latest_dt_sub})
+                  {shop_filter}
                 GROUP BY d.COLOR_CD
                 ORDER BY WH_STOCK DESC
-            """, (stock_brand_cd, part_cd, stock_brand_cd, part_cd))
+            """, (ec_logistics_shop_id, stock_brand_cd, part_cd, ec_logistics_shop_id))
         stock_rows = cursor.fetchall()
 
         # 최근 7일 자사몰(온라인쇼핑몰 직영) 판매량 (DW_SH_SCS_D, SHOP_ID=자사몰)
@@ -2025,7 +2038,8 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
                 stock_items = []
                 for pc, cc in product_codes:
                     print(f"  [재고조회] brand={cfg['brand']} stock_brand_cd={cfg['stock_brand_cd']} part={pc} color={cc or '-'}")
-                    info = fetch_stock_info(pc, cc, cfg["stock_brand_cd"], cfg["jasamol_shop_id"])
+                    info = fetch_stock_info(pc, cc, cfg["stock_brand_cd"],
+                                            cfg["jasamol_shop_id"], cfg["ec_logistics_shop_id"])
                     if info:
                         stock_items.append(info)
                     else:

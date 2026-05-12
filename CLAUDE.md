@@ -82,8 +82,10 @@ roas_12h <= 120% AND spend_12h >= 150,000원
 - **적재 테이블**: `FNF.ORG_PF.META_AD_SNAPSHOT` (ST와 동일 테이블, brand 컬럼으로 분리)
 - **조회 방식**: 현재 스냅샷에서 6h/12h 전 스냅샷의 누적값을 빼서 델타 계산
 - **브랜드 필터**: `WHERE brand = 'MLB'`
-- **재고 조회**: `FNF.PRCS.DW_SCS_DACUM` (물류재고), `FNF.PRCS.DW_SH_SCS_D` (자사몰 판매)
-- **재고 브랜드 코드**: `STOCK_BRAND_CD` 환경변수로 관리 (기본값 `MLB`)
+- **재고 조회**: `FNF.PRCS.DB_SH_SCS_STOCK` (EC 기준 매장별 재고), `FNF.PRCS.DW_SH_SCS_D` (자사몰/오프라인 판매)
+  - 온라인재고: `SHOP_ID = 9001`(성인) / `90007`(키즈) — EC-온라인물류
+  - 전체재고: 위 EC물류 + `ANLYS_DIST_TYPE_CD='F4'`(오프라인 매장) 합산. 자사몰 N1(510/50002)은 매대 0 음수 누계라 제외
+- **재고 브랜드 코드**: 캠페인명 첫글자(`M`/`I`)와 동일 코드 사용. `ec_logistics_shop_id`는 BRAND_CONFIGS에 정의
 
 ---
 
