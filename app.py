@@ -298,6 +298,39 @@ def extract_product_code(ad_name: str) -> tuple[str, str] | tuple[None, None]:
     return []
 
 
+def resolve_stock_for_ad(ad_name: str, cfg: dict):
+    """ad_name 에서 품번 파싱 → 재고 조회.
+    반환: (stock_info, stock_summary, stock_md_guide, stock_product)
+    """
+    product_codes = extract_product_code(ad_name)
+    seen: set = set()
+    unique = []
+    for pc, cc in product_codes:
+        if (pc, cc) not in seen:
+            seen.add((pc, cc))
+            unique.append((pc, cc))
+
+    items = []
+    for pc, cc in unique:
+        print(f"  [재고조회] brand={cfg['brand']} stock_brand_cd={cfg['stock_brand_cd']} part={pc} color={cc or '-'}")
+        info = fetch_stock_info(pc, cc, cfg["stock_brand_cd"],
+                                cfg["jasamol_shop_id"], cfg["ec_logistics_shop_id"])
+        if info:
+            items.append(info)
+        else:
+            print(f"  [경고] 재고 조회 결과 없음: {pc}-{cc}")
+
+    stock_info = items[0] if len(items) == 1 else (items if items else None)
+    stock_summary  = format_stock_summary(stock_info)
+    stock_md_guide = format_stock_md_guide(stock_info)
+    stock_product  = "_".join(
+        f"{pc}" + (f"-{cc}" if cc else "") for pc, cc in unique
+    ) if unique else ""
+    if stock_info:
+        print(f"  -> 재고: {stock_summary}")
+    return stock_info, stock_summary, stock_md_guide, stock_product
+
+
 _SIZE_ORDER = {"XS": 0, "S": 1, "M": 2, "L": 3, "XL": 4, "XXL": 5, "XXXL": 6}
 
 
@@ -2038,6 +2071,8 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
             if not is_recently_alerted(row["AD_ID"], cfg["brand"]):
                 repeat_count       = get_repeat_count(row["AD_ID"], cfg["brand"])
                 creative_image_url = fetch_creative_image(row["AD_ID"])
+                stock_info, stock_summary, stock_md_guide, stock_product = \
+                    resolve_stock_for_ad(row["AD_NAME"], cfg)
                 br_alert_data = {
                     "alert_type":         "BR",
                     "action_type":        "BR",
@@ -2053,11 +2088,15 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
                     "ctr_12h":            row["ctr_12h"],
                     "repeat_count":       repeat_count,
                     "creative_image_url": creative_image_url,
+                    "stock_info":         stock_info,
+                    "stock_summary":      stock_summary,
+                    "stock_md_guide":     stock_md_guide,
+                    "stock_product":      stock_product,
                 }
                 print(f"  -> Gemini 인사이트 생성 중...")
                 insight, _ = generate_ai_insight(br_alert_data)
                 br_alert_data["ai_insight"]   = insight
-                br_alert_data["action_guide"] = build_action_guide(br_alert_data, None)
+                br_alert_data["action_guide"] = build_action_guide(br_alert_data, stock_info)
                 print(f"  AI: {insight}")
                 print(f"  가이드: {br_alert_data['action_guide']}")
                 br_alerts.append(br_alert_data)
@@ -2113,34 +2152,8 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
                 else:
                     print(f"  -> 이미지 없음 (파트너십 광고 또는 영상 소재)")
 
-                product_codes = extract_product_code(row["AD_NAME"])
-                # 동일 (part_cd, color_cd) 중복 제거
-                seen_codes: set = set()
-                unique_product_codes = []
-                for pc, cc in product_codes:
-                    if (pc, cc) not in seen_codes:
-                        seen_codes.add((pc, cc))
-                        unique_product_codes.append((pc, cc))
-                product_codes = unique_product_codes
-
-                stock_items = []
-                for pc, cc in product_codes:
-                    print(f"  [재고조회] brand={cfg['brand']} stock_brand_cd={cfg['stock_brand_cd']} part={pc} color={cc or '-'}")
-                    info = fetch_stock_info(pc, cc, cfg["stock_brand_cd"],
-                                            cfg["jasamol_shop_id"], cfg["ec_logistics_shop_id"])
-                    if info:
-                        stock_items.append(info)
-                    else:
-                        print(f"  [경고] 재고 조회 결과 없음: {pc}-{cc}")
-                # 단일 상품이면 기존 단일 dict, 복수면 리스트
-                stock_info = stock_items[0] if len(stock_items) == 1 else (stock_items if stock_items else None)
-                stock_summary  = format_stock_summary(stock_info)
-                stock_md_guide = format_stock_md_guide(stock_info)
-                stock_product  = "_".join(
-                    f"{pc}" + (f"-{cc}" if cc else "") for pc, cc in product_codes
-                ) if product_codes else ""
-                if stock_info:
-                    print(f"  -> 재고: {stock_summary}")
+                stock_info, stock_summary, stock_md_guide, stock_product = \
+                    resolve_stock_for_ad(row["AD_NAME"], cfg)
 
                 alert_data = {
                     "alert_type":         "PERFORMANCE",
