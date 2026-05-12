@@ -1924,6 +1924,13 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
 
     for _, row in df_now.iterrows():
         ad_info          = f"[{row.get('CHANNEL','OFFICIAL')}] {row['AD_NAME']} (ad_id: {row['AD_ID']})"
+
+        # 카탈로그 광고는 동적으로 상품이 매핑돼 단일 소재 확인 불가 → 알럿 제외
+        ad_name_lower = str(row.get("AD_NAME", "")).lower()
+        if "com" in ad_name_lower and "카탈로그" in ad_name_lower:
+            print(f"  [제외] 카탈로그 광고: {row['AD_NAME']}")
+            continue
+
         campaign_tokens  = re.split(r'[\s_\-|/]+', str(row.get("CAMPAIGN_NAME", "")))
         is_br_campaign   = "BR" in [t.upper() for t in campaign_tokens]
 
