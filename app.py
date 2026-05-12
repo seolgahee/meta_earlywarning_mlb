@@ -280,8 +280,11 @@ def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str,
                      jasamol_shop_id: str, ec_logistics_shop_id: str) -> dict | None:
     """
     DB_SH_SCS_STOCK(EC 기준 매장별 재고) + DW_SH_SCS_D(자사몰/오프라인 판매) 기반.
-    - 온라인재고(wh): SHOP_ID = ec_logistics_shop_id (EC-온라인물류) 의 AVAILABLE_STOCK_QTY
-    - 전체재고(total): EC물류 + 오프라인매장(F4) 합산 (자사몰 N1 음수 누계, 외부몰 N2 제외)
+    - 사용 컬럼: AVAILABLE_STK_STOCK_QTY (매장 SKU 가용재고).
+      AVAILABLE_STOCK_QTY 는 EC가 직접 핸들링한 누계라 백화점 등에서 음수 → 신뢰 불가.
+    - 온라인재고(wh):  SHOP_ID = ec_logistics_shop_id (EC-온라인물류, dist_type=N1)
+    - 전체재고(total): EC물류 + 오프라인매장 합산
+      오프라인 매장 = ANLYS_DIST_TYPE_CD IN ('AX','AS','S2','S1') (백화점/대리점/직영점)
     반환: {
         "prdt_nm": "W 하이웨이스트 우븐 플리츠 스커트",
         "is_mc": False,
@@ -303,16 +306,17 @@ def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str,
             FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SH_SCS_STOCK
             WHERE DT <= CURRENT_DATE
         """
-        # WHERE 절: EC물류 SHOP 또는 오프라인 매장(F4)만 포함 (자사몰 N1 음수 / 외부몰 N2 제외)
-        shop_filter = "AND (d.SHOP_ID = %s OR sh.ANLYS_DIST_TYPE_CD = 'F4')"
+        # WHERE 절: EC물류 SHOP 또는 오프라인 매장(백화점 AX/AS, 대리점 S2, 직영점 S1)만 포함
+        # 자사몰 N1·외부몰(F1/F3)·면세점(D) 등 제외
+        shop_filter = "AND (d.SHOP_ID = %s OR sh.ANLYS_DIST_TYPE_CD IN ('AX','AS','S2','S1'))"
 
         if color_cd:
             # 단일 컬러 → 사이즈별
             cursor.execute(f"""
                 SELECT d.SIZE_CD,
-                       SUM(CASE WHEN d.SHOP_ID = %s THEN d.AVAILABLE_STOCK_QTY ELSE 0 END) AS WH_STOCK,
-                       SUM(d.AVAILABLE_STOCK_QTY) AS TOTAL_STOCK,
-                       MAX(p.PRDT_NM)             AS PRDT_NM
+                       SUM(CASE WHEN d.SHOP_ID = %s THEN d.AVAILABLE_STK_STOCK_QTY ELSE 0 END) AS WH_STOCK,
+                       SUM(d.AVAILABLE_STK_STOCK_QTY) AS TOTAL_STOCK,
+                       MAX(p.PRDT_NM)                 AS PRDT_NM
                 FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SH_SCS_STOCK d
                 JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SHOP sh
                   ON sh.BRD_CD = d.BRD_CD AND sh.SHOP_ID = d.SHOP_ID
@@ -327,9 +331,9 @@ def fetch_stock_info(part_cd: str, color_cd: str, stock_brand_cd: str,
             # 전체 컬러 → 컬러별 합산
             cursor.execute(f"""
                 SELECT d.COLOR_CD,
-                       SUM(CASE WHEN d.SHOP_ID = %s THEN d.AVAILABLE_STOCK_QTY ELSE 0 END) AS WH_STOCK,
-                       SUM(d.AVAILABLE_STOCK_QTY) AS TOTAL_STOCK,
-                       MAX(p.PRDT_NM)             AS PRDT_NM
+                       SUM(CASE WHEN d.SHOP_ID = %s THEN d.AVAILABLE_STK_STOCK_QTY ELSE 0 END) AS WH_STOCK,
+                       SUM(d.AVAILABLE_STK_STOCK_QTY) AS TOTAL_STOCK,
+                       MAX(p.PRDT_NM)                 AS PRDT_NM
                 FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SH_SCS_STOCK d
                 JOIN {SNOWFLAKE_DATABASE}.{SNOWFLAKE_STOCK_SCHEMA}.DB_SHOP sh
                   ON sh.BRD_CD = d.BRD_CD AND sh.SHOP_ID = d.SHOP_ID
