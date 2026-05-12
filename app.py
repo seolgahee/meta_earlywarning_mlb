@@ -1628,7 +1628,7 @@ def send_slack_alert(alerts: list, cfg: dict) -> None:
 def fetch_creative_image(ad_id: str) -> str:
     """
     ad_id 기준으로 소재 이미지 URL 반환.
-    우선순위: thumbnail_url > image_url > image_hash → adimages API
+    우선순위: image_url > object_story_id.full_picture > image_hash → adimages.url > thumbnail_url
     조회 실패 또는 이미지 없으면 빈 문자열 반환.
     """
     try:
@@ -1664,10 +1664,7 @@ def fetch_creative_image(ad_id: str) -> str:
                 if full_picture:
                     return full_picture
 
-        # fallback: thumbnail_url (저해상도 프리뷰)
-        if creative.get("thumbnail_url"):
-            return creative["thumbnail_url"]
-
+        # image_hash → adimages.url (원본 CDN 링크, thumbnail보다 고화질)
         image_hash = creative.get("image_hash")
         if image_hash:
             img_resp = requests.get(
@@ -1682,7 +1679,11 @@ def fetch_creative_image(ad_id: str) -> str:
             if img_resp.status_code == 200:
                 data = img_resp.json().get("data", [])
                 if data:
-                    return data[0].get("permalink_url") or data[0].get("url") or ""
+                    return data[0].get("url") or data[0].get("permalink_url") or ""
+
+        # 최후 fallback: thumbnail_url (저해상도 프리뷰)
+        if creative.get("thumbnail_url"):
+            return creative["thumbnail_url"]
 
         return ""
     except Exception as e:
