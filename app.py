@@ -484,7 +484,7 @@ def format_stock_summary(stock_info) -> str:
         elif total_wh == 0:
             return f"{prefix}[MC 한정] 온라인 완판 · 매장 재고 {total_all:,}개 잔여"
         else:
-            return f"{prefix}[MC 한정] 물류재고 {total_wh:,}개 · 소진 유도 · 예산 유지 또는 소폭 증액"
+            return f"{prefix}[MC 한정] 온라인재고 {total_wh:,}개 · 소진 유도 · 예산 유지 또는 소폭 증액"
 
     dos       = stock_info.get("days_of_supply")
     daily_avg = stock_info.get("daily_avg", 0)
@@ -493,21 +493,21 @@ def format_stock_summary(stock_info) -> str:
     o2o       = stock_info.get("o2o_signal")
     cutoffs   = _dos_cutoffs(stock_info.get("brand_cd", "M"))
     sale_info = f"자사몰 7일 {sale_7d}개 · 일평균 {daily_avg}개" if sale_7d else "자사몰 판매 없음"
-    offline_info = f"매장 합 {offline:,}개" if offline else "매장 재고 없음"
     if total_wh == 0:
-        guide = f"물류창고 소진 · 광고 중단 검토 · {sale_info} · {offline_info}"
+        guide = f"온라인재고 소진 · 광고 중단 검토 · {sale_info}"
     elif o2o == "URGENT":
-        guide = f"🔄[재배치 시급] 온라인 ~{int(dos)}일치 · {offline_info} 적체 · 매장→자사몰 즉시 이동 · {sale_info}"
+        guide = f"🔄[재배치 시급] 온라인 ~{int(dos)}일치 · 매장 적체 · 매장→자사몰 즉시 이동 · {sale_info}"
     elif o2o == "SUGGEST":
-        guide = f"🔄[재배치 권장] 온라인 ~{int(dos)}일치 · {offline_info} 여유 · 매장→자사몰 이동 검토 · {sale_info}"
+        guide = f"🔄[재배치 권장] 온라인 ~{int(dos)}일치 · 매장 여유 · 매장→자사몰 이동 검토 · {sale_info}"
     elif dos is not None and dos < cutoffs["urgent"]:
-        guide = f"~{int(dos)}일치 · 단기 소진 예상 · 자사몰 물류 즉시 보충 필요 · {sale_info} · {offline_info}"
+        guide = f"~{int(dos)}일치 · 단기 소진 예상 · 자사몰 물류 즉시 보충 필요 · {sale_info}"
     elif dos is not None and dos < cutoffs["warning"]:
-        guide = f"~{int(dos)}일치 · 2주 내외 소진 예상 · 자사몰로 물류 이동 검토 · {sale_info} · {offline_info}"
+        guide = f"~{int(dos)}일치 · 2주 내외 소진 예상 · 자사몰로 물류 이동 검토 · {sale_info}"
     else:
         dos_str = f"~{int(dos)}일치" if dos else "판매 없음"
-        guide = f"재고 여유 · {dos_str} · 일cap 상향 검토 가능 · {sale_info} · {offline_info}"
-    return f"{prefix}물류창고 {total_wh:,}개 · {guide}"
+        guide = f"재고 여유 · {dos_str} · 일cap 상향 검토 가능 · {sale_info}"
+    breakdown = f"온라인재고 {total_wh:,}개 · 매장 {offline:,}개 · 전체 {total_all:,}개"
+    return f"{prefix}{breakdown} · {guide}"
 
 
 def format_stock_md_guide(stock_info) -> str:
@@ -525,7 +525,7 @@ def format_stock_md_guide(stock_info) -> str:
                 offline_breakdown = " | " + " / ".join(parts)
         cutoffs = _dos_cutoffs(brand_cd)
         if total_wh == 0:
-            return f"[즉시] 온라인 물류창고 재고 없음 (매장 재고 {total_all}개) → 광고 전환 대응 불가, 자사몰로 즉시 물류 이동 필요{offline_breakdown}"
+            return f"[즉시] 온라인재고 없음 (매장 재고 {total_all}개) → 광고 전환 대응 불가, 자사몰로 즉시 물류 이동 필요{offline_breakdown}"
         if o2o == "URGENT":
             return f"🔄[재배치 시급] 온라인 ~{int(dos)}일치 · 매장 합 {offline_stock:,}개 적체 → 매장→자사몰 즉시 이동 ({sale_info}){offline_breakdown}"
         if o2o == "SUGGEST":
@@ -589,7 +589,7 @@ def format_stock_md_guide(stock_info) -> str:
         if total_all_mc == 0:
             return f"{size_line}\n완판 완료 → 광고 중단"
         elif total_wh == 0:
-            return f"{size_line}\n온라인 물류창고 소진 (매장 재고 {total_all_mc}개 잔여) → 광고 중단 검토"
+            return f"{size_line}\n온라인재고 소진 (매장 재고 {total_all_mc}개 잔여) → 광고 중단 검토"
         else:
             return f"{size_line}\n잔여 {total_wh}개 · 소진 목표 유지 → 광고 지속"
 
@@ -598,7 +598,7 @@ def format_stock_md_guide(stock_info) -> str:
     action = _action(total_wh, total_all, dos, sale_7d, daily_avg, brand_cd, offline_stock, o2o, offline_sales)
 
     if zero_wh_sizes:
-        action += f" | {', '.join(zero_wh_sizes)} 물류창고 재고 없음 주의"
+        action += f" | {', '.join(zero_wh_sizes)} 온라인재고 없음 주의"
 
     return f"{size_line}\n{action}"
 
@@ -640,7 +640,7 @@ def build_stock_html(stock_info) -> str:
 
     def _action_text(total_wh, total_all, dos, brand_cd, offline_stock=0, o2o=None):
         if total_wh == 0:
-            return f"물류창고 재고 없음 (매장 {total_all:,}개) → 즉시 물류 이동 필요"
+            return f"온라인재고 없음 (매장 {total_all:,}개) → 즉시 물류 이동 필요"
         if o2o == "URGENT":
             return f"🔄 [재배치 시급] 매장 {offline_stock:,}개 적체 → 매장→자사몰 즉시 이동"
         if o2o == "SUGGEST":
@@ -692,7 +692,7 @@ def build_stock_html(stock_info) -> str:
             )
         stock_table = (
             '<table style="border-collapse:collapse;width:100%;font-size:13px;">'
-            f'<thead><tr><th {TH_GREEN}>상품명</th><th {TH_GREEN}>컬러/사이즈별 물류재고</th><th {TH_GREEN_R}>합계</th></tr></thead>'
+            f'<thead><tr><th {TH_GREEN}>상품명</th><th {TH_GREEN}>컬러/사이즈별 온라인재고</th><th {TH_GREEN_R}>합계</th></tr></thead>'
             f'<tbody>{stock_rows}</tbody></table>'
         )
     elif stock_info.get("colors") is not None:
@@ -709,7 +709,7 @@ def build_stock_html(stock_info) -> str:
             )
         stock_table = (
             '<table style="border-collapse:collapse;width:100%;font-size:13px;">'
-            f'<thead><tr><th {TH_GREEN}>컬러</th><th {TH_GREEN_R}>물류재고</th><th {TH_GREEN_R}>전체재고</th></tr></thead>'
+            f'<thead><tr><th {TH_GREEN}>컬러</th><th {TH_GREEN_R}>온라인재고</th><th {TH_GREEN_R}>전체재고</th></tr></thead>'
             f'<tbody>{stock_rows}</tbody></table>'
         )
     else:
@@ -726,7 +726,7 @@ def build_stock_html(stock_info) -> str:
             )
         stock_table = (
             '<table style="border-collapse:collapse;width:100%;font-size:13px;">'
-            f'<thead><tr><th {TH_GREEN}>사이즈</th><th {TH_GREEN_R}>물류재고</th><th {TH_GREEN_R}>전체재고</th></tr></thead>'
+            f'<thead><tr><th {TH_GREEN}>사이즈</th><th {TH_GREEN_R}>온라인재고</th><th {TH_GREEN_R}>전체재고</th></tr></thead>'
             f'<tbody>{stock_rows}</tbody></table>'
         )
 
@@ -1121,7 +1121,7 @@ def build_action_guide(alert: dict, stock_info) -> str:
         o2o      = stock_info.get("o2o_signal")
         cutoffs  = _dos_cutoffs(stock_info.get("brand_cd", "M"))
         if total_wh == 0:
-            stock_warn = "🚨 온라인 물류창고 재고 없음 → 광고 중단 후 자사몰 물류 이동 필요"
+            stock_warn = "🚨 온라인재고 없음 → 광고 중단 후 자사몰 물류 이동 필요"
         elif o2o == "URGENT":
             stock_warn = f"🔄 [재배치 시급] 온라인 {int(dos)}일치 · 매장 합 {offline:,}개 적체 → 매장→자사몰 즉시 이동"
         elif o2o == "SUGGEST":
