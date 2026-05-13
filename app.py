@@ -1772,6 +1772,7 @@ def fetch_creative_image(ad_id: str) -> str:
     """
     ad_id 기준으로 소재 이미지 URL 반환.
     우선순위:
+      0) object_story_spec.link_data.child_attachments[0].image_hash (캐러셀/슬라이드 광고)
       1) image_url
       2) object_story_id.full_picture (파트너십/인플루언서 IG 포스트 원본)
       3) image_hash → adimages.url (단일 이미지 광고)
@@ -1794,6 +1795,17 @@ def fetch_creative_image(ad_id: str) -> str:
         if resp.status_code != 200:
             return ""
         creative = resp.json().get("creative", {})
+
+        # 0) 캐러셀(슬라이드) 광고: child_attachments[0].image_hash 가 첫 슬라이드.
+        #    image_url / link_data.image_hash 는 캐러셀 콘텐츠와 매칭되지 않는 사례 다수.
+        link_data_pre = (creative.get("object_story_spec") or {}).get("link_data") or {}
+        for child in (link_data_pre.get("child_attachments") or []):
+            h = child.get("image_hash")
+            if h:
+                url = _resolve_image_hash(h)
+                if url:
+                    return url
+                break
 
         # 1) image_url이 원본 고화질이므로 최우선
         if creative.get("image_url"):
