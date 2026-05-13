@@ -318,17 +318,17 @@ def extract_purchase_revenue(action_values: list) -> float:
     return 0.0
 
 
-def extract_product_code(ad_name: str) -> tuple[str, str] | tuple[None, None]:
+def extract_product_code(ad_name: str) -> list[tuple[str, str | None]]:
     """
-    소재명에서 MLB 품번 목록 추출. 컬러는 DB에 별도 컬럼이라 None 처리.
-    MLB 품번 패턴: [3 또는 7] + 영문3~5 + 숫자3~4 + 영문0~1
-      성인: 3으로 시작 (예: 3ACPB245N, 3FTSB0263)
+    소재명에서 MLB (품번, 컬러) 목록 추출.
+    MLB 품번 패턴: [3 또는 7] + 영문3~5 + 숫자2~4 + 영문0~1
+      성인: 3으로 시작 (예: 3ACPB245N, 3FTSB0263, 3ACPBB15N)
       키즈: 7으로 시작 (예: 7ARNCB063)
+    품번-컬러 형식(고정): 품번 직후 `-` + 컬러코드([0-9A-Z]{2,8}). 예: 7ASQCB063-50IVS
+    컬러 없으면 두 번째 튜플 요소는 None.
     """
-    codes = re.findall(r'(?:^|[-_])([37][A-Z]{3,5}\d{3,4}[A-Z]?)(?=[-_]|$)', ad_name)
-    if codes:
-        return [(c, None) for c in codes]
-    return []
+    pattern = r'(?:^|[-_])([37][A-Z]{3,5}\d{2,4}[A-Z]?)(?:-([0-9A-Z]{2,8}))?(?=[-_]|$)'
+    return [(m.group(1), m.group(2)) for m in re.finditer(pattern, ad_name)]
 
 
 def resolve_stock_for_ad(ad_name: str, cfg: dict):
