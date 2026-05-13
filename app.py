@@ -1392,6 +1392,7 @@ def build_email_html(alerts: list, brand: str) -> str:
             <p style="margin:0 0 4px;font-size:11px;color:#888;font-weight:bold;">액션 가이드</p>
             <p style="margin:0;font-size:13px;color:#333;">{a['action_guide']}</p>
           </div>
+          {build_stock_html(a.get("stock_info")) if a.get("stock_product") else ""}
         </div>
         """
             continue
@@ -1704,17 +1705,17 @@ def send_slack_alert(alerts: list, cfg: dict) -> None:
                 {"type": "section", "text": {"type": "mrkdwn", "text": f":dart: *액션 가이드*\n{a.get('action_guide', '')}"}},
             ]
 
-            # 재고 섹션 추가 (상품코드 파싱된 경우만)
-            if a.get("stock_product"):
-                stock_text = (
-                    f":package: *재고 현황* (`{a['stock_product']}`)\n"
-                    f"{a.get('stock_summary', '재고 정보 없음')}"
-                )
-                md_guide = a.get("stock_md_guide", "")
-                if md_guide:
-                    stock_text += f"\n\n*MD 액션 가이드*\n{md_guide}"
-                blocks.append({"type": "divider"})
-                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": stock_text}})
+        # 재고 섹션 추가 (BR/Performance 공통, 상품코드 파싱된 경우만)
+        if a.get("stock_product"):
+            stock_text = (
+                f":package: *재고 현황* (`{a['stock_product']}`)\n"
+                f"{a.get('stock_summary', '재고 정보 없음')}"
+            )
+            md_guide = a.get("stock_md_guide", "")
+            if md_guide:
+                stock_text += f"\n\n*MD 액션 가이드*\n{md_guide}"
+            blocks.append({"type": "divider"})
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": stock_text}})
 
         # 소재 이미지가 있으면 상단에 추가
         if a.get("creative_image_url"):
