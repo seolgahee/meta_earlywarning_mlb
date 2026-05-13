@@ -2166,15 +2166,20 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
         # Performance 캠페인 분기
         # ════════════════════════════════════
 
-        # ── Opportunity Alert 공통 진입 조건 (브랜드별 임계치) ──
-        roas_improving = row["roas_6h"] >= row["roas_12h"]
+        # ── Opportunity Alert 공통 진입 조건 (브랜드별 임계치 + 추세 비교) ──
+        # 임계치(절대값): 최근 6h 롤링 구간 합이 임계치 충족
+        # 추세(시점 비교): 최근 6h vs 직전 6h(=6h~12h전) 비교 — cold start 케이스 자동 제외
         opp_cfg = _get_opp_filter(cfg["brand"])
-        opp_gate = (
+        abs_gate = (
             row["roas_6h"]      >= opp_cfg["roas_6h_min"]
             and row["spend_6h"] >= opp_cfg["spend_6h_min"]
             and row["purchases_6h"] >= opp_cfg["purchases_6h_min"]
-            and roas_improving
         )
+        trend_gate = (
+            row["spend_prev_6h"] >= opp_cfg["spend_6h_min"]   # 직전 6h에도 의미있는 spend
+            and row["roas_6h"]    > row["roas_prev_6h"]        # ROAS 개선 (purchases 추세는 subtype에서 분류)
+        )
+        opp_gate = abs_gate and trend_gate
 
         if opp_gate:
             action_type = determine_action_type(
