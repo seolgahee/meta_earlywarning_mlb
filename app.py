@@ -155,39 +155,72 @@ def check_recent_snapshot_skip(window_minutes: int = 30) -> None:
 # ─────────────────────────────────────────
 # Alert 조건 (운영 기준)
 # ─────────────────────────────────────────
-# Opportunity 공통 필터 (Performance 캠페인 전용 — BR은 BR_ALERT_CONDITIONS 사용)
-OPP_FILTER = {
-    "purchases_6h_min":   2,           # TODO(per-brand): MLB 성인/키즈 재산출 대상
-    "spend_6h_min":       10_000,      # TODO(per-brand): MLB 성인/키즈 재산출 대상
-    "roas_6h_min":        3.0,   # 300%   # TODO(per-brand): MLB 성인/키즈 재산출 대상
-    # roas_6h >= roas_12h 는 코드에서 직접 비교
+# Opportunity 공통 필터 (Performance 캠페인 전용 — BR은 BR_ALERT_CONDITIONS_BY_BRAND 사용)
+# 브랜드별 분기: 2026-05-13 KST 42h 분석 결과 (광고당 ~6 샘플, rolling 6h window)
+#   성인은 평소 전환 볼륨이 높아(6h당 0.65건 baseline) purch>=3로 강화
+#   키즈는 spend 분포가 성인 절반이고 ROAS p75=8.16으로 우수 → spend 컷 완화 + ROAS 강화
+OPP_FILTERS = {
+    "MLB": {        # 성인
+        "purchases_6h_min":  3,
+        "spend_6h_min":      10_000,
+        "roas_6h_min":       4.0,   # 400%
+    },
+    "MLB_KIDS": {   # 키즈
+        "purchases_6h_min":  2,
+        "spend_6h_min":      5_000,
+        "roas_6h_min":       5.0,   # 500%
+    },
 }
+
+
+def _get_opp_filter(brand: str) -> dict:
+    return OPP_FILTERS.get(brand, OPP_FILTERS["MLB"])
 
 # action_type 분기 조건 (우선순위: CAMPAIGN_SCALE > PRODUCT_EXTRACTION > CREATIVE_EXPANSION)
 # ASC 통합 구조 기준: ad_id 단위 개별 소재 예산 조정 불가 → 캠페인 일cap/일예산 조정만 가능
-ACTION_CONDITIONS = {
-    "CAMPAIGN_SCALE": {
-        "roas_6h_min":      3.0,   # 300%   # TODO(per-brand): MLB 성인/키즈 재산출 대상
-        "purchases_6h_min": 3,             # TODO(per-brand): MLB 성인/키즈 재산출 대상
-        "guide": "전환 효율이 급증한 구간입니다. ASC 캠페인 일cap 상향을 검토하세요.",
+# 2026-05-13 튜닝: entry gate (OPP_FILTERS)와 일관성 유지 — 각 분기는 entry보다 strict해야 의미 있음
+_GUIDE_SCALE = "전환 효율이 급증한 구간입니다. ASC 캠페인 일cap 상향을 검토하세요."
+_GUIDE_EXTRACT = "해당 소재 내 상품을 확인하여 동일 상품 기반 신규 소재 2~3종 추가 제작을 권장합니다."
+ACTION_CONDITIONS_BY_BRAND = {
+    "MLB": {        # 성인: entry roas≥4, spend≥10k, purch≥3
+        "CAMPAIGN_SCALE":   {"roas_6h_min": 4.0, "purchases_6h_min": 4,       "guide": _GUIDE_SCALE},
+        "PRODUCT_EXTRACTION":{"roas_6h_min": 4.0, "spend_6h_min": 50_000,     "guide": _GUIDE_EXTRACT},
+        "CREATIVE_EXPANSION":{"roas_6h_min": 4.0, "purchases_6h_min": 3,       "guide": _GUIDE_EXTRACT},
     },
-    "PRODUCT_EXTRACTION": {
-        "roas_6h_min":  3.0,       # 300%   # TODO(per-brand): MLB 성인/키즈 재산출 대상
-        "spend_6h_min": 50_000,            # TODO(per-brand): MLB 성인/키즈 재산출 대상
-        "guide": "해당 소재 내 상품을 확인하여 동일 상품 기반 신규 소재 2~3종 추가 제작을 권장합니다.",
-    },
-    "CREATIVE_EXPANSION": {
-        "roas_6h_min":      2.5,   # 250%   # TODO(per-brand): MLB 성인/키즈 재산출 대상
-        "purchases_6h_min": 2,             # TODO(per-brand): MLB 성인/키즈 재산출 대상
-        "guide": "해당 소재 내 상품을 확인하여 동일 상품 기반 신규 소재 2~3종 추가 제작을 권장합니다.",
+    "MLB_KIDS": {   # 키즈: entry roas≥5, spend≥5k, purch≥2
+        "CAMPAIGN_SCALE":   {"roas_6h_min": 5.0, "purchases_6h_min": 3,       "guide": _GUIDE_SCALE},
+        "PRODUCT_EXTRACTION":{"roas_6h_min": 5.0, "spend_6h_min": 25_000,     "guide": _GUIDE_EXTRACT},
+        "CREATIVE_EXPANSION":{"roas_6h_min": 5.0, "purchases_6h_min": 2,       "guide": _GUIDE_EXTRACT},
     },
 }
 
+
+def _get_action_cond(brand: str, action_type: str) -> dict:
+    return ACTION_CONDITIONS_BY_BRAND.get(brand, ACTION_CONDITIONS_BY_BRAND["MLB"])[action_type]
+
+
 # BR(브랜딩) 캠페인 전용 알럿 조건 — 전환 지표 사용 안 함
-BR_ALERT_CONDITIONS = {
-    "impressions_6h_min": 10_000,   # TODO(per-brand): MLB 성인/키즈 재산출 대상
-    "clicks_6h_min":      200,      # TODO(per-brand): MLB 성인/키즈 재산출 대상
+# 2026-05-13 튜닝: 42h 분석 기준 (성인 60샘플, 키즈 28샘플)
+#   현행 imp≥10k/clk≥200은 둘 다 0건 통과 → 광고가 발생하는 분포 기준으로 완화
+#   ratio는 SURGE/DROP 각각 ±5% margin (CTR p25=0.77, p75=1.04 분포 반영)
+BR_ALERT_CONDITIONS_BY_BRAND = {
+    "MLB": {        # 성인: IMP p75=1879, CLK p25=17 → entry 완화
+        "impressions_6h_min": 2_000,
+        "clicks_6h_min":      30,
+        "ctr_surge_ratio":    1.05,
+        "ctr_drop_ratio":     0.85,
+    },
+    "MLB_KIDS": {   # 키즈: 표본 부족 (28샘플, valid CTR 11) → 보수적 적용
+        "impressions_6h_min": 1_000,
+        "clicks_6h_min":      20,
+        "ctr_surge_ratio":    1.05,
+        "ctr_drop_ratio":     0.85,
+    },
 }
+
+
+def _get_br_cond(brand: str) -> dict:
+    return BR_ALERT_CONDITIONS_BY_BRAND.get(brand, BR_ALERT_CONDITIONS_BY_BRAND["MLB"])
 
 # Kill Alert 조건
 KILL_CONDITION = {
@@ -901,14 +934,16 @@ def detect_channel(campaign_name: str, adset_name: str) -> str:
     return "OFFICIAL"
 
 
-def determine_action_type(roas_6h: float, spend_6h: float, purchases_6h: float) -> str | None:
+def determine_action_type(roas_6h: float, spend_6h: float, purchases_6h: float, brand: str = "MLB") -> str | None:
     """우선순위 순으로 action_type 결정. 해당 없으면 None."""
-    c = ACTION_CONDITIONS
-    if roas_6h >= c["CAMPAIGN_SCALE"]["roas_6h_min"] and purchases_6h >= c["CAMPAIGN_SCALE"]["purchases_6h_min"]:
+    cs = _get_action_cond(brand, "CAMPAIGN_SCALE")
+    pe = _get_action_cond(brand, "PRODUCT_EXTRACTION")
+    ce = _get_action_cond(brand, "CREATIVE_EXPANSION")
+    if roas_6h >= cs["roas_6h_min"] and purchases_6h >= cs["purchases_6h_min"]:
         return "CAMPAIGN_SCALE"
-    if roas_6h >= c["PRODUCT_EXTRACTION"]["roas_6h_min"] and spend_6h >= c["PRODUCT_EXTRACTION"]["spend_6h_min"]:
+    if roas_6h >= pe["roas_6h_min"] and spend_6h >= pe["spend_6h_min"]:
         return "PRODUCT_EXTRACTION"
-    if roas_6h >= c["CREATIVE_EXPANSION"]["roas_6h_min"] and purchases_6h >= c["CREATIVE_EXPANSION"]["purchases_6h_min"]:
+    if roas_6h >= ce["roas_6h_min"] and purchases_6h >= ce["purchases_6h_min"]:
         return "CREATIVE_EXPANSION"
     return None
 
@@ -919,6 +954,7 @@ def determine_alert_subtype(
     purchases_prev_6h: float = 0, clicks_6h: float = 0,
     clicks_prev_6h: float = 0, roas_prev_6h: float = 0,
     purchases_12h: float = 0,
+    brand: str = "MLB",
 ) -> str:
     """
     alert 성격 분류 (전환 단계 기준)
@@ -930,7 +966,7 @@ def determine_alert_subtype(
     CLICK_SURGE:           전환 0건, CTR_6h > CTR_12h (순수 클릭 반응형)
     DEFAULT:               위 조건에 해당하지 않는 경우
     """
-    roas_threshold = OPP_FILTER["roas_6h_min"]
+    roas_threshold = _get_opp_filter(brand)["roas_6h_min"]
 
     # purchases >= 3: Winner 판단
     if purchases_6h >= 3 and clicks_6h >= 100:
@@ -962,16 +998,19 @@ def determine_alert_subtype(
     return "DEFAULT"
 
 
-def determine_br_subtype(ctr_6h: float, ctr_12h: float) -> str | None:
+def determine_br_subtype(ctr_6h: float, ctr_12h: float, brand: str = "MLB") -> str | None:
     """
-    BR(브랜딩) 캠페인 전용 subtype 판정.
-    CTR_SURGE: ctr_6h > ctr_12h
-    CTR_DROP:  ctr_6h < ctr_12h * 0.8  (20% 이상 하락)
+    BR(브랜딩) 캠페인 전용 subtype 판정. 브랜드별 surge/drop ratio 적용.
+    CTR_SURGE: ctr_6h >= ctr_12h * surge_ratio
+    CTR_DROP:  ctr_6h <= ctr_12h * drop_ratio
     None:      조건 미해당
     """
-    if ctr_6h > ctr_12h:
+    if ctr_12h <= 0:
+        return None
+    c = _get_br_cond(brand)
+    if ctr_6h >= ctr_12h * c["ctr_surge_ratio"]:
         return "BR_CTR_SURGE"
-    if ctr_12h > 0 and ctr_6h < ctr_12h * 0.8:   # TODO(per-brand): MLB 성인/키즈 재산출 대상
+    if ctr_6h <= ctr_12h * c["ctr_drop_ratio"]:
         return "BR_CTR_DROP"
     return None
 
@@ -1363,8 +1402,11 @@ def build_email_html(alerts: list, brand: str) -> str:
         action_ko     = ACTION_TYPE_KO.get(action_type, action_type)
 
         # 기준치 계산
-        roas_base   = ACTION_CONDITIONS[action_type]["roas_6h_min"]
-        purch_base  = ACTION_CONDITIONS[action_type].get("purchases_6h_min", OPP_FILTER["purchases_6h_min"])
+        ac          = _get_action_cond(brand, action_type)
+        opp         = _get_opp_filter(brand)
+        roas_base   = ac["roas_6h_min"]
+        purch_base  = ac.get("purchases_6h_min", opp["purchases_6h_min"])
+        spend_base  = ac.get("spend_6h_min",     opp["spend_6h_min"])
         roas_diff_pp  = (a["roas_6h"] - roas_base) * 100
         purch_diff    = int(a["purchases_6h"]) - purch_base
 
@@ -1434,9 +1476,9 @@ def build_email_html(alerts: list, brand: str) -> str:
             <tbody>
               <tr>
                 <td style="padding:6px 10px;border:1px solid #ddd;">Spend_6h</td>
-                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#999;">100,000원</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#999;">{spend_base:,.0f}원</td>
                 <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;">{a['spend_6h']:,.0f}원</td>
-                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#27ae60;font-weight:bold;">+{(a['spend_6h']/100_000-1)*100:.0f}%</td>
+                <td style="padding:6px 10px;border:1px solid #ddd;text-align:right;color:#27ae60;font-weight:bold;">+{(a['spend_6h']/spend_base-1)*100:.0f}%</td>
               </tr>
               <tr style="background:#f9f9f9;">
                 <td style="padding:6px 10px;border:1px solid #ddd;">Clicks_6h</td>
@@ -1608,8 +1650,11 @@ def send_slack_alert(alerts: list, cfg: dict) -> None:
             action_type   = a["action_type"]
             color         = ACTION_TYPE_COLOR.get(action_type, "#1a73e8")
             action_ko     = ACTION_TYPE_KO.get(action_type, action_type)
-            roas_base     = ACTION_CONDITIONS[action_type]["roas_6h_min"]
-            purch_base    = ACTION_CONDITIONS[action_type].get("purchases_6h_min", OPP_FILTER["purchases_6h_min"])
+            ac            = _get_action_cond(cfg["brand"], action_type)
+            opp           = _get_opp_filter(cfg["brand"])
+            roas_base     = ac["roas_6h_min"]
+            purch_base    = ac.get("purchases_6h_min", opp["purchases_6h_min"])
+            spend_base    = ac.get("spend_6h_min",     opp["spend_6h_min"])
             roas_diff_pp  = (a["roas_6h"] - roas_base) * 100
             purch_diff    = int(a["purchases_6h"]) - purch_base
             subtype_label = {
@@ -1637,7 +1682,7 @@ def send_slack_alert(alerts: list, cfg: dict) -> None:
                     "```\n" +
                     ljust_dw("지표", 16) + rjust_dw("기준", 11) + rjust_dw("현재값", 13) + rjust_dw("대비", 11) + "\n" +
                     "─" * 53 + "\n" +
-                    ljust_dw("Spend_6h", 16)    + rjust_dw("100,000원", 11) + rjust_dw(f"{a['spend_6h']:,.0f}원", 13)              + rjust_dw("─", 11) + "\n" +
+                    ljust_dw("Spend_6h", 16)    + rjust_dw(f"{spend_base:,.0f}원", 11) + rjust_dw(f"{a['spend_6h']:,.0f}원", 13)    + rjust_dw("─", 11) + "\n" +
                     ljust_dw("Clicks_6h", 16)   + rjust_dw("─", 11)         + rjust_dw(f"{int(a.get('clicks_6h',0)):,}회", 13)    + rjust_dw("─", 11) + "\n" +
                     ljust_dw("Purchases_6h", 16)+ rjust_dw(f"{purch_base}건", 11) + rjust_dw(f"{int(a['purchases_6h'])}건", 13)   + rjust_dw(('+' if purch_diff>=0 else '')+f"{purch_diff}건", 11) + "\n" +
                     ljust_dw("Revenue_6h", 16)  + rjust_dw("─", 11)         + rjust_dw(f"{a['revenue_6h']:,.0f}원", 13)           + rjust_dw("─", 11) + "\n" +
@@ -2052,7 +2097,7 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
         # BR 브랜딩 캠페인 분기
         # ════════════════════════════════════
         if is_br_campaign:
-            bc = BR_ALERT_CONDITIONS
+            bc = _get_br_cond(cfg["brand"])
             br_gate = (
                 row["impressions_6h"] >= bc["impressions_6h_min"]
                 and row["clicks_6h"]  >= bc["clicks_6h_min"]
@@ -2060,7 +2105,7 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
             if not br_gate:
                 continue
 
-            br_subtype = determine_br_subtype(row["ctr_6h"], row["ctr_12h"])
+            br_subtype = determine_br_subtype(row["ctr_6h"], row["ctr_12h"], brand=cfg["brand"])
             if br_subtype is None:
                 continue
 
@@ -2108,18 +2153,19 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
         # Performance 캠페인 분기
         # ════════════════════════════════════
 
-        # ── Opportunity Alert 공통 진입 조건 ──
+        # ── Opportunity Alert 공통 진입 조건 (브랜드별 임계치) ──
         roas_improving = row["roas_6h"] >= row["roas_12h"]
+        opp_cfg = _get_opp_filter(cfg["brand"])
         opp_gate = (
-            row["roas_6h"]      >= OPP_FILTER["roas_6h_min"]
-            and row["spend_6h"] >= OPP_FILTER["spend_6h_min"]
-            and row["purchases_6h"] >= OPP_FILTER["purchases_6h_min"]
+            row["roas_6h"]      >= opp_cfg["roas_6h_min"]
+            and row["spend_6h"] >= opp_cfg["spend_6h_min"]
+            and row["purchases_6h"] >= opp_cfg["purchases_6h_min"]
             and roas_improving
         )
 
         if opp_gate:
             action_type = determine_action_type(
-                row["roas_6h"], row["spend_6h"], row["purchases_6h"]
+                row["roas_6h"], row["spend_6h"], row["purchases_6h"], brand=cfg["brand"]
             )
             if action_type is None:
                 action_type = "CREATIVE_EXPANSION"
@@ -2130,6 +2176,7 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
                 row["purchases_prev_6h"], row["clicks_6h"],
                 row["clicks_prev_6h"], row["roas_prev_6h"],
                 row["purchases_12h"],
+                brand=cfg["brand"],
             )
             print(f"[{action_type}/{_subtype_preview}] {ad_info}")
             print(f"  roas_6h={row['roas_6h']:.1%}  spend_6h={row['spend_6h']:,.0f}원"
@@ -2144,6 +2191,7 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
                     row["purchases_6h"], row["roas_6h"], row["roas_12h"],
                     row["purchases_prev_6h"], row["clicks_6h"],
                     row["clicks_prev_6h"], row["roas_prev_6h"],
+                    brand=cfg["brand"],
                 )
                 print(f"  -> 소재 이미지 조회 중...")
                 creative_image_url = fetch_creative_image(row["AD_ID"])
