@@ -207,6 +207,7 @@ BR_ALERT_CONDITIONS_BY_BRAND = {
     "MLB": {        # 성인 v2 (2026-05-14, 2.8일치 분포 기반): IMP p75=1376 / CTR_RATIO p90=1.18
         "impressions_6h_min": 1_000,   # 2000 → 1000: 진입 P75 컷 (현행 P90은 11%만 통과)
         "clicks_6h_min":      30,
+        "clicks_12h_min":     50,      # baseline 가드 (키즈와 일관, 작은 표본 ratio 노이즈 차단)
         "ctr_surge_ratio":    1.15,    # 1.05 → 1.15: P85+ 컷, 진짜 급등만
         "ctr_drop_ratio":     0.85,
     },
