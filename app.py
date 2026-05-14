@@ -204,15 +204,16 @@ def _get_action_cond(brand: str, action_type: str) -> dict:
 #   현행 imp≥10k/clk≥200은 둘 다 0건 통과 → 광고가 발생하는 분포 기준으로 완화
 #   ratio는 SURGE/DROP 각각 ±5% margin (CTR p25=0.77, p75=1.04 분포 반영)
 BR_ALERT_CONDITIONS_BY_BRAND = {
-    "MLB": {        # 성인: IMP p75=1879, CLK p25=17 → entry 완화
-        "impressions_6h_min": 2_000,
+    "MLB": {        # 성인 v2 (2026-05-14, 2.8일치 분포 기반): IMP p75=1376 / CTR_RATIO p90=1.18
+        "impressions_6h_min": 1_000,   # 2000 → 1000: 진입 P75 컷 (현행 P90은 11%만 통과)
         "clicks_6h_min":      30,
-        "ctr_surge_ratio":    1.05,
+        "ctr_surge_ratio":    1.15,    # 1.05 → 1.15: P85+ 컷, 진짜 급등만
         "ctr_drop_ratio":     0.85,
     },
-    "MLB_KIDS": {   # 키즈: 표본 부족 (28샘플, valid CTR 11) → 보수적 적용
+    "MLB_KIDS": {   # 키즈 v2: 표본 부족(CTR_RATIO valid 22) → ratio 컷 유지, clk_12h baseline 가드 신설
         "impressions_6h_min": 1_000,
         "clicks_6h_min":      20,
+        "clicks_12h_min":     50,      # 신규: 작은 표본 ratio 노이즈 차단 (clk_12h 누적 50 미만 제외)
         "ctr_surge_ratio":    1.05,
         "ctr_drop_ratio":     0.85,
     },
@@ -2093,6 +2094,7 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
     opp_alerts = []
     br_alerts  = []
     kill_found = False
+    br_seen: set = set()  # 같은 사이클 내 BR 알럿 중복 방지 (df_now에 동일 ad_id가 중복 등장하는 케이스 차단)
 
     for _, row in df_now.iterrows():
         ad_info          = f"[{row.get('CHANNEL','OFFICIAL')}] {row['AD_NAME']} (ad_id: {row['AD_ID']})"
@@ -2114,12 +2116,18 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
             br_gate = (
                 row["impressions_6h"] >= bc["impressions_6h_min"]
                 and row["clicks_6h"]  >= bc["clicks_6h_min"]
+                and row["clicks_12h"] >= bc.get("clicks_12h_min", 0)  # 키즈 전용 baseline 가드
             )
             if not br_gate:
                 continue
 
             br_subtype = determine_br_subtype(row["ctr_6h"], row["ctr_12h"], brand=cfg["brand"])
             if br_subtype is None:
+                continue
+
+            if row["AD_ID"] in br_seen:
+                print(f"[BR/{br_subtype}] {ad_info}")
+                print(f"  -> 같은 사이클 내 동일 ad_id 중복 — 건너뜀.")
                 continue
 
             print(f"[BR/{br_subtype}] {ad_info}")
@@ -2158,6 +2166,7 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
                 print(f"  AI: {insight}")
                 print(f"  가이드: {br_alert_data['action_guide']}")
                 br_alerts.append(br_alert_data)
+                br_seen.add(row["AD_ID"])
             else:
                 print(f"  -> 12시간 내 발송 이력 있음. 건너뜀.")
             continue
