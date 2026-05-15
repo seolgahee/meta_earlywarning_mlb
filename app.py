@@ -320,6 +320,26 @@ def extract_purchase_revenue(action_values: list) -> float:
     return 0.0
 
 
+def extract_live_days(ad_name: str) -> int | None:
+    """소재명 맨 앞 6자리(YYMMDD)를 라이브 시작일로 파싱해 KST 기준 경과 일수 반환.
+
+    형식: 'YYMMDD_...' (예: '260514_CV_캔버스화_...'). 시작일 = 0일 경과.
+    파싱 실패·미래 날짜는 None.
+    """
+    m = re.match(r'^(\d{6})_', ad_name or "")
+    if not m:
+        return None
+    try:
+        start = datetime.strptime(m.group(1), "%y%m%d").date()
+    except ValueError:
+        return None
+    today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+    elapsed = (today - start).days
+    if elapsed < 0:
+        return None
+    return elapsed
+
+
 def extract_product_code(ad_name: str) -> list[tuple[str, str | None]]:
     """
     소재명에서 MLB (품번, 컬러) 목록 추출.
@@ -1147,6 +1167,12 @@ def generate_ai_insight(alert: dict) -> tuple[str, str]:
         subtype_context = {k: "인플루언서컷을 활용해 제작한 광고 소재의 반응이 좋아진 이유를 소재 특성·비주얼 몰입도 관점에서 해석하세요." for k in subtype_context}
 
     if is_br:
+        ld           = alert.get("live_days")
+        live_info    = f"라이브 시작 후 {ld}일 경과 (오늘 {ld + 1}일째)" if ld is not None else "라이브 시작일 미상 (소재명 앞 6자리 YYMMDD 파싱 실패)"
+        fatigue_rule = (
+            "- 피로도(소재 노출 포화)는 라이브 시작 후 최소 3일 이상 경과한 경우에만 주요 원인으로 거론하세요. "
+            "라이브 1~2일차에는 피로도 단정 금지 — 그 시점의 CTR 변동은 도달 타겟 변화·시간대 분포·초기 노출 변동성 등으로 해석하세요."
+        )
         prompt = f"""
 당신은 디지털 광고 브랜딩 마케터입니다.
 아래 Meta 브랜딩 광고 데이터를 보고 AI 인사이트(왜 CTR 변화가 발생했는지)만 작성하세요.
@@ -1155,6 +1181,7 @@ def generate_ai_insight(alert: dict) -> tuple[str, str]:
 [광고 정보]
 - 캠페인: {alert['campaign_name']}
 - 광고소재: {alert['ad_name']}
+- 운영기간: {live_info}
 - alert 유형: {alert_subtype}
 
 [성과 데이터]
@@ -1164,6 +1191,7 @@ def generate_ai_insight(alert: dict) -> tuple[str, str]:
 
 [작성 지침]
 - {subtype_context.get(alert_subtype, subtype_context['BR_CTR_SURGE'])}
+{fatigue_rule}
 - 입력 데이터만 근거로 해석, 외부 요인 추정 금지
 - 숫자 과장 금지, 한국어, 짧고 실무적인 톤
 
@@ -1352,6 +1380,8 @@ def build_email_html(alerts: list, brand: str) -> str:
                 <td style="padding:4px 8px;font-family:monospace;font-size:12px;">{a['ad_name']}</td></tr>
             <tr style="background:#f9f9f9;"><td style="padding:4px 8px;color:#888;">Ad ID</td>
                 <td style="padding:4px 8px;color:#555;font-size:12px;">{a['ad_id']}</td></tr>
+            <tr><td style="padding:4px 8px;color:#888;">운영기간</td>
+                <td style="padding:4px 8px;color:#333;font-size:12px;">{(str(a['live_days'] + 1) + '일째') if a.get('live_days') is not None else '미상'}</td></tr>
           </table>
           <h4 style="margin:12px 0 8px;color:#333;font-size:13px;">최근 6시간 성과 (브랜딩 지표)</h4>
           <table style="border-collapse:collapse;width:100%;font-size:13px;">
@@ -1621,6 +1651,7 @@ def send_slack_alert(alerts: list, cfg: dict) -> None:
             br_color      = "#8e44ad" if alert_subtype == "BR_CTR_SURGE" else "#e74c3c"
             subtype_label = "CTR 상승형" if alert_subtype == "BR_CTR_SURGE" else "CTR 하락형"
             header_text   = f":bar_chart: *BR 브랜딩 Alert* — `{subtype_label}`"
+            live_days_label = f"{a['live_days'] + 1}일째" if a.get("live_days") is not None else "미상"
             blocks = [
                 {"type": "header", "text": {"type": "plain_text", "text": f"Meta Ads BR 브랜딩 Alert · {cfg['brand']}"}},
                 {"type": "section", "text": {"type": "mrkdwn", "text": header_text}},
@@ -1631,6 +1662,7 @@ def send_slack_alert(alerts: list, cfg: dict) -> None:
                     {"type": "mrkdwn", "text": f"*Ad Set*\n`{a['adset_name']}`"},
                     {"type": "mrkdwn", "text": f"*Creative*\n`{a['ad_name']}`"},
                     {"type": "mrkdwn", "text": f"*Ad ID*\n`{a['ad_id']}`"},
+                    {"type": "mrkdwn", "text": f"*운영기간*\n{live_days_label}"},
                 ]},
                 {"type": "divider"},
                 {"type": "section", "text": {"type": "mrkdwn", "text": (
@@ -2131,9 +2163,11 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
                 print(f"  -> 같은 사이클 내 동일 ad_id 중복 — 건너뜀.")
                 continue
 
+            live_days = extract_live_days(row["AD_NAME"])
+            live_days_str = f"{live_days + 1}일째" if live_days is not None else "미상"
             print(f"[BR/{br_subtype}] {ad_info}")
             print(f"  impressions_6h={int(row['impressions_6h']):,}  clicks_6h={int(row['clicks_6h']):,}"
-                  f"  ctr_6h={row['ctr_6h']:.2%}  ctr_12h={row['ctr_12h']:.2%}")
+                  f"  ctr_6h={row['ctr_6h']:.2%}  ctr_12h={row['ctr_12h']:.2%}  운영={live_days_str}")
 
             if not is_recently_alerted(row["AD_ID"], cfg["brand"]):
                 repeat_count       = get_repeat_count(row["AD_ID"], cfg["brand"])
@@ -2159,6 +2193,7 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
                     "stock_summary":      stock_summary,
                     "stock_md_guide":     stock_md_guide,
                     "stock_product":      stock_product,
+                    "live_days":          live_days,
                 }
                 print(f"  -> Gemini 인사이트 생성 중...")
                 insight, _ = generate_ai_insight(br_alert_data)
