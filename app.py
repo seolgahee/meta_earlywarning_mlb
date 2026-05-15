@@ -204,18 +204,18 @@ def _get_action_cond(brand: str, action_type: str) -> dict:
 #   현행 imp≥10k/clk≥200은 둘 다 0건 통과 → 광고가 발생하는 분포 기준으로 완화
 #   ratio는 SURGE/DROP 각각 ±5% margin (CTR p25=0.77, p75=1.04 분포 반영)
 BR_ALERT_CONDITIONS_BY_BRAND = {
-    "MLB": {        # 성인 v2 (2026-05-14, 2.8일치 분포 기반): IMP p75=1376 / CTR_RATIO p90=1.18
-        "impressions_6h_min": 1_000,   # 2000 → 1000: 진입 P75 컷 (현행 P90은 11%만 통과)
+    "MLB": {        # 성인 v3 (2026-05-15, 3.8일치 491샘플): CTR_RATIO p90=1.21, p95=1.44
+        "impressions_6h_min": 1_000,
         "clicks_6h_min":      30,
-        "clicks_12h_min":     50,      # baseline 가드 (키즈와 일관, 작은 표본 ratio 노이즈 차단)
-        "ctr_surge_ratio":    1.15,    # 1.05 → 1.15: P85+ 컷, 진짜 급등만
+        "clicks_12h_min":     50,
+        "ctr_surge_ratio":    1.20,    # v2 1.15 → 1.20: 분포 우측 확장으로 P85 컷이 P75로 떨어짐 → P90+ 재고정
         "ctr_drop_ratio":     0.85,
     },
-    "MLB_KIDS": {   # 키즈 v2: 표본 부족(CTR_RATIO valid 22) → ratio 컷 유지, clk_12h baseline 가드 신설
+    "MLB_KIDS": {   # 키즈 v3 (2026-05-15, 147샘플): CTR_RATIO p90=1.14, p95=1.17
         "impressions_6h_min": 1_000,
         "clicks_6h_min":      20,
-        "clicks_12h_min":     50,      # 신규: 작은 표본 ratio 노이즈 차단 (clk_12h 누적 50 미만 제외)
-        "ctr_surge_ratio":    1.05,
+        "clicks_12h_min":     50,
+        "ctr_surge_ratio":    1.15,    # v2 1.05 → 1.15: 단일 광고 7시간 연속 진입 차단 (P95+ 컷)
         "ctr_drop_ratio":     0.85,
     },
 }
