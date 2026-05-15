@@ -1058,7 +1058,7 @@ def _alert_log_key(ad_id: str, brand: str) -> str:
     return f"{brand}:{ad_id}"
 
 
-def is_recently_alerted(ad_id: str, brand: str, hours: int = 12) -> bool:
+def is_recently_alerted(ad_id: str, brand: str, hours: int = 6) -> bool:
     log = load_alert_log()
     entry = log.get(_alert_log_key(ad_id, brand), {})
     last_sent_str = entry.get("last_sent") if isinstance(entry, dict) else entry
