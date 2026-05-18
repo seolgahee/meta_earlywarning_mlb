@@ -34,10 +34,10 @@ SF = {
 }
 TABLE = f"{SF['database']}.{SF['schema']}.{os.getenv('SNOWFLAKE_TABLE', 'META_AD_SNAPSHOT')}"
 
-# app.py:206 BR_ALERT_CONDITIONS_BY_BRAND v3 와 동일하게 유지
+# app.py BR_ALERT_CONDITIONS_BY_BRAND v4 와 동일하게 유지
 BR_COND = {
-    "ADULT": dict(imp=1_000, clk=30, clk_12h=50, surge=1.20, drop=0.85),
-    "KIDS":  dict(imp=1_000, clk=20, clk_12h=50, surge=1.15, drop=0.85),
+    "ADULT": dict(imp=1_000, clk=30, clk_12h=50, ctr_12h_min=0.02, surge=1.20, drop=0.80),
+    "KIDS":  dict(imp=1_000, clk=20, clk_12h=50, ctr_12h_min=0.02, surge=1.15, drop=0.85),
 }
 
 
@@ -139,12 +139,16 @@ def main():
 
     for seg, cond in BR_COND.items():
         sub = m[m["SEG"] == seg].copy()
-        entry = (sub["IMP"] >= cond["imp"]) & (sub["CLK"] >= cond["clk"]) & (sub["CLK_12H"] >= cond["clk_12h"])
+        entry = (
+            (sub["IMP"] >= cond["imp"]) & (sub["CLK"] >= cond["clk"])
+            & (sub["CLK_12H"] >= cond["clk_12h"]) & (sub["CTR_12H"] >= cond["ctr_12h_min"])
+        )
         surge = sub[entry & (sub["RATIO"] >= cond["surge"])].copy()
         drop  = sub[entry & (sub["RATIO"] <= cond["drop"])].copy()
 
         print(f"\n{'═' * 80}")
-        print(f"  [{seg}] BR 진입 조건: IMP≥{cond['imp']:,} & CLK≥{cond['clk']} & CLK_12H≥{cond['clk_12h']}")
+        print(f"  [{seg}] BR 진입 조건: IMP≥{cond['imp']:,} & CLK≥{cond['clk']} & CLK_12H≥{cond['clk_12h']}"
+              f" & CTR_12H≥{cond['ctr_12h_min']:.0%}")
         print(f"         SURGE: ratio≥{cond['surge']}  /  DROP: ratio≤{cond['drop']}")
         print(f"         진입 통과 샘플 {entry.sum()} / 전체 {len(sub)}, SURGE {len(surge)}건 / DROP {len(drop)}건")
         print(f"{'═' * 80}")

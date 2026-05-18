@@ -204,17 +204,19 @@ def _get_action_cond(brand: str, action_type: str) -> dict:
 #   현행 imp≥10k/clk≥200은 둘 다 0건 통과 → 광고가 발생하는 분포 기준으로 완화
 #   ratio는 SURGE/DROP 각각 ±5% margin (CTR p25=0.77, p75=1.04 분포 반영)
 BR_ALERT_CONDITIONS_BY_BRAND = {
-    "MLB": {        # 성인 v3 (2026-05-15, 3.8일치 491샘플): CTR_RATIO p90=1.21, p95=1.44
+    "MLB": {        # 성인 v4 (2026-05-18, 6.7일치): ctr_12h 바닥값 신설 — 브랜드 영상 노이즈 제거
         "impressions_6h_min": 1_000,
         "clicks_6h_min":      30,
         "clicks_12h_min":     50,
+        "ctr_12h_min":        0.02,    # v4 신설: ctr_12h<2%는 노출 8만+/CTR 0.03~0.1% 영상 광고 — ratio가 순수 노이즈라 제외
         "ctr_surge_ratio":    1.20,    # v2 1.15 → 1.20: 분포 우측 확장으로 P85 컷이 P75로 떨어짐 → P90+ 재고정
-        "ctr_drop_ratio":     0.85,
+        "ctr_drop_ratio":     0.80,    # v3 0.85 → v4 0.80: DROP 발송 추가 축소
     },
-    "MLB_KIDS": {   # 키즈 v3 (2026-05-15, 147샘플): CTR_RATIO p90=1.14, p95=1.17
+    "MLB_KIDS": {   # 키즈 v4 (2026-05-18): BR CTR p50=3%라 노이즈 없음 — 일관성 위해 바닥값만 동일 적용
         "impressions_6h_min": 1_000,
         "clicks_6h_min":      20,
         "clicks_12h_min":     50,
+        "ctr_12h_min":        0.02,    # v4 신설 (키즈는 사실상 안전망 — 통과율 영향 거의 없음)
         "ctr_surge_ratio":    1.15,    # v2 1.05 → 1.15: 단일 광고 7시간 연속 진입 차단 (P95+ 컷)
         "ctr_drop_ratio":     0.85,
     },
@@ -2012,26 +2014,96 @@ def load_to_snowflake(df: pd.DataFrame, cfg: dict) -> None:
         print("[경고] Snowflake 환경변수 누락 - 적재 건너뜀")
         return
 
-    insert_cols = [
-        "SNAPSHOT_TS", "BRAND", "AD_ACCOUNT_ID",
-        "CAMPAIGN_ID", "CAMPAIGN_NAME",
-        "ADSET_ID", "ADSET_NAME",
-        "AD_ID", "AD_NAME",
-        "IMPRESSIONS_CUM", "CLICKS_CUM", "SPEND_CUM", "PURCHASES_CUM", "REVENUE_CUM",
-        "CHANNEL",
-    ]
-    df_insert = df[insert_cols]
-
     print(f"[정보] Snowflake 연결 중... ({SNOWFLAKE_ACCOUNT})")
     conn = get_snowflake_conn()
     try:
-        cursor       = conn.cursor()
+        cursor = conn.cursor()
+
+        # 직전 스냅샷(*_CUM, *_TOTAL_CUM) 일괄 조회 — 자정 경계 무관한 통합 누적 계산용
+        cursor.execute(f"""
+            SELECT AD_ID, SNAPSHOT_TS,
+                   IMPRESSIONS_CUM, CLICKS_CUM, SPEND_CUM, PURCHASES_CUM, REVENUE_CUM,
+                   IMPRESSIONS_TOTAL_CUM, CLICKS_TOTAL_CUM, SPEND_TOTAL_CUM,
+                   PURCHASES_TOTAL_CUM, REVENUE_TOTAL_CUM
+            FROM (
+                SELECT AD_ID, SNAPSHOT_TS,
+                       IMPRESSIONS_CUM, CLICKS_CUM, SPEND_CUM, PURCHASES_CUM, REVENUE_CUM,
+                       IMPRESSIONS_TOTAL_CUM, CLICKS_TOTAL_CUM, SPEND_TOTAL_CUM,
+                       PURCHASES_TOTAL_CUM, REVENUE_TOTAL_CUM,
+                       ROW_NUMBER() OVER (PARTITION BY AD_ID ORDER BY SNAPSHOT_TS DESC) AS rn
+                FROM {SNOWFLAKE_TABLE.upper()}
+                WHERE BRAND = '{cfg["brand"]}'
+                  AND SNAPSHOT_TS >= DATEADD(day, -2, CURRENT_TIMESTAMP())
+            ) WHERE rn = 1
+        """)
+        prev_map = {}
+        for r in cursor.fetchall():
+            prev_map[r[0]] = {
+                "ts": r[1],
+                "IMPRESSIONS_CUM":       r[2] or 0,
+                "CLICKS_CUM":            r[3] or 0,
+                "SPEND_CUM":             r[4] or 0,
+                "PURCHASES_CUM":         r[5] or 0,
+                "REVENUE_CUM":           r[6] or 0,
+                "IMPRESSIONS_TOTAL_CUM": r[7] or 0,
+                "CLICKS_TOTAL_CUM":      r[8] or 0,
+                "SPEND_TOTAL_CUM":       r[9] or 0,
+                "PURCHASES_TOTAL_CUM":   r[10] or 0,
+                "REVENUE_TOTAL_CUM":     r[11] or 0,
+            }
+
+        cur_kst_date = datetime.now(ZoneInfo("Asia/Seoul")).date()
+        cum_pairs = [
+            ("IMPRESSIONS_CUM", "IMPRESSIONS_TOTAL_CUM"),
+            ("CLICKS_CUM",      "CLICKS_TOTAL_CUM"),
+            ("SPEND_CUM",       "SPEND_TOTAL_CUM"),
+            ("PURCHASES_CUM",   "PURCHASES_TOTAL_CUM"),
+            ("REVENUE_CUM",     "REVENUE_TOTAL_CUM"),
+        ]
+        for _, col_total in cum_pairs:
+            df[col_total] = 0.0
+
+        for idx, row in df.iterrows():
+            prev = prev_map.get(row["AD_ID"])
+            if prev is None:
+                prev_kst_date = None
+            else:
+                prev_ts = prev["ts"]
+                if prev_ts.tzinfo is None:
+                    prev_ts = prev_ts.replace(tzinfo=timezone.utc)
+                prev_kst_date = prev_ts.astimezone(ZoneInfo("Asia/Seoul")).date()
+
+            for col_cum, col_total in cum_pairs:
+                cum_now = float(row[col_cum] or 0)
+                # 같은 KST 날짜면 1시간 증분, 다른 날짜(자정 넘음)면 cum(now) 자체가 그날 0시 이후 증분
+                if prev is not None and prev_kst_date == cur_kst_date:
+                    delta = max(0.0, cum_now - float(prev[col_cum]))
+                else:
+                    delta = max(0.0, cum_now)
+                prev_total = float(prev[col_total]) if prev is not None else 0.0
+                df.at[idx, col_total] = prev_total + delta
+
+        for col in ["IMPRESSIONS_TOTAL_CUM", "CLICKS_TOTAL_CUM", "PURCHASES_TOTAL_CUM"]:
+            df[col] = df[col].astype("int64")
+
+        insert_cols = [
+            "SNAPSHOT_TS", "BRAND", "AD_ACCOUNT_ID",
+            "CAMPAIGN_ID", "CAMPAIGN_NAME",
+            "ADSET_ID", "ADSET_NAME",
+            "AD_ID", "AD_NAME",
+            "IMPRESSIONS_CUM", "CLICKS_CUM", "SPEND_CUM", "PURCHASES_CUM", "REVENUE_CUM",
+            "IMPRESSIONS_TOTAL_CUM", "CLICKS_TOTAL_CUM", "SPEND_TOTAL_CUM",
+            "PURCHASES_TOTAL_CUM", "REVENUE_TOTAL_CUM",
+            "CHANNEL",
+        ]
+        df_insert = df[insert_cols]
+
         cols         = ", ".join(insert_cols)
         placeholders = ", ".join(["%s"] * len(insert_cols))
         sql          = f"INSERT INTO {SNOWFLAKE_TABLE.upper()} ({cols}) VALUES ({placeholders})"
         rows         = [tuple(row) for row in df_insert.itertuples(index=False)]
         cursor.executemany(sql, rows)
-        print(f"[완료] Snowflake 적재 성공 - {len(rows)}행")
+        print(f"[완료] Snowflake 적재 성공 - {len(rows)}행 (TOTAL_CUM 포함)")
     finally:
         conn.close()
 
@@ -2046,18 +2118,22 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
         return
 
     # ── Snowflake에서 6h / 12h 전 스냅샷 조회 ──
+    # *_TOTAL_CUM 은 자정 무관 통합 누적값. 백필 이전 row 대비 안전을 위해 *_CUM 폴백 유지.
     conn = get_snowflake_conn()
     try:
         cursor = conn.cursor()
         for hours, label in [(6, "6H"), (12, "12H")]:
             query = f"""
                 SELECT ad_id, channel,
-                       spend_cum, purchases_cum, revenue_cum,
-                       clicks_cum, impressions_cum
+                       spend_past, purchases_past, revenue_past,
+                       clicks_past, impressions_past
                 FROM (
                     SELECT ad_id, channel,
-                           spend_cum, purchases_cum, revenue_cum,
-                           clicks_cum, impressions_cum,
+                           COALESCE(spend_total_cum,       spend_cum)       AS spend_past,
+                           COALESCE(purchases_total_cum,   purchases_cum)   AS purchases_past,
+                           COALESCE(revenue_total_cum,     revenue_cum)     AS revenue_past,
+                           COALESCE(clicks_total_cum,      clicks_cum)      AS clicks_past,
+                           COALESCE(impressions_total_cum, impressions_cum) AS impressions_past,
                            ROW_NUMBER() OVER (
                                PARTITION BY ad_id
                                ORDER BY ABS(DATEDIFF('minute',
@@ -2086,19 +2162,28 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
         conn.close()
 
     # ── 델타 / ROAS / CTR 계산 ──
+    # 현재값은 *_TOTAL_CUM (자정 무관). NULL 발생 시(과거 row) *_CUM 폴백.
+    spend_now       = df_now["SPEND_TOTAL_CUM"].fillna(df_now["SPEND_CUM"])
+    purchases_now   = df_now["PURCHASES_TOTAL_CUM"].fillna(df_now["PURCHASES_CUM"])
+    revenue_now     = df_now["REVENUE_TOTAL_CUM"].fillna(df_now["REVENUE_CUM"])
+    clicks_now      = df_now["CLICKS_TOTAL_CUM"].fillna(df_now["CLICKS_CUM"])
+    impressions_now = df_now["IMPRESSIONS_TOTAL_CUM"].fillna(df_now["IMPRESSIONS_CUM"])
+
     for label in ["6H", "12H"]:
         lbl = label.lower()
-        ps  = pd.to_numeric(df_now[f"SPEND_{label}_PAST"],       errors="coerce").fillna(0.0)
-        pp  = pd.to_numeric(df_now[f"PURCHASES_{label}_PAST"],   errors="coerce").fillna(0.0)
-        pr  = pd.to_numeric(df_now[f"REVENUE_{label}_PAST"],     errors="coerce").fillna(0.0)
-        pc  = pd.to_numeric(df_now[f"CLICKS_{label}_PAST"],      errors="coerce").fillna(0.0)
-        pi  = pd.to_numeric(df_now[f"IMPRESSIONS_{label}_PAST"], errors="coerce").fillna(0.0)
+        # past가 없으면(자정 직후 N시간 전 스냅샷 부재, 또는 새 광고) delta=0 처리.
+        # *_TOTAL_CUM 은 자정 무관 누적이라 fillna(0) 시 delta 폭발 → false positive 발생함.
+        ps  = pd.to_numeric(df_now[f"SPEND_{label}_PAST"],       errors="coerce").fillna(spend_now)
+        pp  = pd.to_numeric(df_now[f"PURCHASES_{label}_PAST"],   errors="coerce").fillna(purchases_now)
+        pr  = pd.to_numeric(df_now[f"REVENUE_{label}_PAST"],     errors="coerce").fillna(revenue_now)
+        pc  = pd.to_numeric(df_now[f"CLICKS_{label}_PAST"],      errors="coerce").fillna(clicks_now)
+        pi  = pd.to_numeric(df_now[f"IMPRESSIONS_{label}_PAST"], errors="coerce").fillna(impressions_now)
 
-        df_now[f"spend_{lbl}"]       = df_now["SPEND_CUM"]       - ps
-        df_now[f"purchases_{lbl}"]   = df_now["PURCHASES_CUM"]   - pp
-        df_now[f"revenue_{lbl}"]     = df_now["REVENUE_CUM"]     - pr
-        df_now[f"clicks_{lbl}"]      = df_now["CLICKS_CUM"]      - pc
-        df_now[f"impressions_{lbl}"] = df_now["IMPRESSIONS_CUM"] - pi
+        df_now[f"spend_{lbl}"]       = spend_now       - ps
+        df_now[f"purchases_{lbl}"]   = purchases_now   - pp
+        df_now[f"revenue_{lbl}"]     = revenue_now     - pr
+        df_now[f"clicks_{lbl}"]      = clicks_now      - pc
+        df_now[f"impressions_{lbl}"] = impressions_now - pi
 
         df_now[f"roas_{lbl}"] = df_now.apply(
             lambda r, l=lbl: r[f"revenue_{l}"] / r[f"spend_{l}"] if r[f"spend_{l}"] > 0 else 0,
@@ -2150,6 +2235,7 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
                 row["impressions_6h"] >= bc["impressions_6h_min"]
                 and row["clicks_6h"]  >= bc["clicks_6h_min"]
                 and row["clicks_12h"] >= bc.get("clicks_12h_min", 0)  # 키즈 전용 baseline 가드
+                and row["ctr_12h"]    >= bc.get("ctr_12h_min", 0)     # v4: 영상 광고(CTR 극소) 제외
             )
             if not br_gate:
                 continue
