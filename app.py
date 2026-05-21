@@ -160,14 +160,14 @@ def check_recent_snapshot_skip(window_minutes: int = 30) -> None:
 #   성인은 평소 전환 볼륨이 높아(6h당 0.65건 baseline) purch>=3로 강화
 #   키즈는 spend 분포가 성인 절반이고 ROAS p75=8.16으로 우수 → spend 컷 완화 + ROAS 강화
 OPP_FILTERS = {
-    "MLB": {        # 성인
+    "MLB": {        # 성인 v2 (2026-05-21, 10일치): ROAS p75=4.52 → 분포 중앙 컷이라 4.0→5.0(p85)로 ↑
         "purchases_6h_min":  3,
         "spend_6h_min":      10_000,
-        "roas_6h_min":       4.0,   # 400%
+        "roas_6h_min":       5.0,   # 500%
     },
-    "MLB_KIDS": {   # 키즈
-        "purchases_6h_min":  2,
-        "spend_6h_min":      5_000,
+    "MLB_KIDS": {   # 키즈 v2 (2026-05-21, 10일치): hits 387건/주 과다 → spend 5k→10k + purch 2→3
+        "purchases_6h_min":  3,
+        "spend_6h_min":      10_000,
         "roas_6h_min":       5.0,   # 500%
     },
 }
@@ -182,15 +182,15 @@ def _get_opp_filter(brand: str) -> dict:
 _GUIDE_SCALE = "전환 효율이 급증한 구간입니다. ASC 캠페인 일cap 상향을 검토하세요."
 _GUIDE_EXTRACT = "해당 소재 내 상품을 확인하여 동일 상품 기반 신규 소재 2~3종 추가 제작을 권장합니다."
 ACTION_CONDITIONS_BY_BRAND = {
-    "MLB": {        # 성인: entry roas≥4, spend≥10k, purch≥3
-        "CAMPAIGN_SCALE":   {"roas_6h_min": 4.0, "purchases_6h_min": 4,       "guide": _GUIDE_SCALE},
-        "PRODUCT_EXTRACTION":{"roas_6h_min": 4.0, "spend_6h_min": 50_000,     "guide": _GUIDE_EXTRACT},
-        "CREATIVE_EXPANSION":{"roas_6h_min": 4.0, "purchases_6h_min": 3,       "guide": _GUIDE_EXTRACT},
+    "MLB": {        # 성인 v2: entry roas≥5, spend≥10k, purch≥3 — roas는 entry와 동기
+        "CAMPAIGN_SCALE":   {"roas_6h_min": 5.0, "purchases_6h_min": 4,       "guide": _GUIDE_SCALE},
+        "PRODUCT_EXTRACTION":{"roas_6h_min": 5.0, "spend_6h_min": 50_000,     "guide": _GUIDE_EXTRACT},
+        "CREATIVE_EXPANSION":{"roas_6h_min": 5.0, "purchases_6h_min": 3,       "guide": _GUIDE_EXTRACT},
     },
-    "MLB_KIDS": {   # 키즈: entry roas≥5, spend≥5k, purch≥2
-        "CAMPAIGN_SCALE":   {"roas_6h_min": 5.0, "purchases_6h_min": 3,       "guide": _GUIDE_SCALE},
+    "MLB_KIDS": {   # 키즈 v2: entry roas≥5, spend≥10k, purch≥3 — purch entry+1 패턴 유지
+        "CAMPAIGN_SCALE":   {"roas_6h_min": 5.0, "purchases_6h_min": 4,       "guide": _GUIDE_SCALE},
         "PRODUCT_EXTRACTION":{"roas_6h_min": 5.0, "spend_6h_min": 25_000,     "guide": _GUIDE_EXTRACT},
-        "CREATIVE_EXPANSION":{"roas_6h_min": 5.0, "purchases_6h_min": 2,       "guide": _GUIDE_EXTRACT},
+        "CREATIVE_EXPANSION":{"roas_6h_min": 5.0, "purchases_6h_min": 3,       "guide": _GUIDE_EXTRACT},
     },
 }
 
@@ -204,21 +204,21 @@ def _get_action_cond(brand: str, action_type: str) -> dict:
 #   현행 imp≥10k/clk≥200은 둘 다 0건 통과 → 광고가 발생하는 분포 기준으로 완화
 #   ratio는 SURGE/DROP 각각 ±5% margin (CTR p25=0.77, p75=1.04 분포 반영)
 BR_ALERT_CONDITIONS_BY_BRAND = {
-    "MLB": {        # 성인 v4 (2026-05-18, 6.7일치): ctr_12h 바닥값 신설 — 브랜드 영상 노이즈 제거
+    "MLB": {        # 성인 v5 (2026-05-21, 10일치): v4 surge 1.20은 strict 과다(10일 4건) → 1.10으로 완화
         "impressions_6h_min": 1_000,
         "clicks_6h_min":      30,
         "clicks_12h_min":     50,
-        "ctr_12h_min":        0.02,    # v4 신설: ctr_12h<2%는 노출 8만+/CTR 0.03~0.1% 영상 광고 — ratio가 순수 노이즈라 제외
-        "ctr_surge_ratio":    1.20,    # v2 1.15 → 1.20: 분포 우측 확장으로 P85 컷이 P75로 떨어짐 → P90+ 재고정
-        "ctr_drop_ratio":     0.80,    # v3 0.85 → v4 0.80: DROP 발송 추가 축소
+        "ctr_12h_min":        0.02,    # v4 신설 유지: 영상 광고 ratio 노이즈 제거
+        "ctr_surge_ratio":    1.10,    # v5: 1.20 → 1.10 (분포 p90=1.18 — SURGE 4→16 hits/10일)
+        "ctr_drop_ratio":     0.80,    # v4 유지: DROP 10건/10일로 적정
     },
-    "MLB_KIDS": {   # 키즈 v4 (2026-05-18): BR CTR p50=3%라 노이즈 없음 — 일관성 위해 바닥값만 동일 적용
+    "MLB_KIDS": {   # 키즈 v5 (2026-05-21, 10일치): clk 20→30 + surge 1.15 → 1.10 (10일 7건 → 21건)
         "impressions_6h_min": 1_000,
-        "clicks_6h_min":      20,
+        "clicks_6h_min":      30,       # v5: 20 → 30 (CLK_6H p50=34, p75=91 분포 반영)
         "clicks_12h_min":     50,
-        "ctr_12h_min":        0.02,    # v4 신설 (키즈는 사실상 안전망 — 통과율 영향 거의 없음)
-        "ctr_surge_ratio":    1.15,    # v2 1.05 → 1.15: 단일 광고 7시간 연속 진입 차단 (P95+ 컷)
-        "ctr_drop_ratio":     0.85,
+        "ctr_12h_min":        0.02,    # v4 유지 (안전망)
+        "ctr_surge_ratio":    1.10,    # v5: 1.15 → 1.10 (분포 p90=1.12)
+        "ctr_drop_ratio":     0.85,    # v4 유지: DROP 9건/10일로 적정
     },
 }
 
@@ -1372,7 +1372,14 @@ def build_email_html(alerts: list, brand: str) -> str:
               'style="max-width:100%;border-radius:6px;border:1px solid #e0e0e0;" '
               'alt="소재 이미지" />'
               '</div>'
-          ) if a.get("creative_image_url") else ""}
+          ) if a.get("creative_image_url") else (
+              '<div style="margin-bottom:14px;text-align:center;">'
+              f'<a href="{a["creative_post_url"]}" target="_blank" '
+              'style="display:inline-block;padding:10px 18px;background:#1a73e8;color:#fff;'
+              'text-decoration:none;border-radius:6px;font-size:13px;font-weight:bold;">'
+              '📸 파트너십 원본 게시물 보기</a>'
+              '</div>'
+          ) if a.get("creative_post_url") else ""}
           <table style="width:100%;font-size:13px;border-collapse:collapse;margin-bottom:12px;">
             <tr><td style="padding:4px 8px;color:#888;width:110px;">Campaign</td>
                 <td style="padding:4px 8px;font-family:monospace;font-size:12px;">{a['campaign_name']}</td></tr>
@@ -1477,7 +1484,14 @@ def build_email_html(alerts: list, brand: str) -> str:
               'style="max-width:100%;border-radius:6px;border:1px solid #e0e0e0;" '
               'alt="소재 이미지" />'
               '</div>'
-          ) if a.get("creative_image_url") else ""}
+          ) if a.get("creative_image_url") else (
+              '<div style="margin-bottom:14px;text-align:center;">'
+              f'<a href="{a["creative_post_url"]}" target="_blank" '
+              'style="display:inline-block;padding:10px 18px;background:#1a73e8;color:#fff;'
+              'text-decoration:none;border-radius:6px;font-size:13px;font-weight:bold;">'
+              '📸 파트너십 원본 게시물 보기</a>'
+              '</div>'
+          ) if a.get("creative_post_url") else ""}
 
           <table style="width:100%;font-size:13px;border-collapse:collapse;margin-bottom:12px;">
             <tr>
@@ -1760,6 +1774,15 @@ def send_slack_alert(alerts: list, cfg: dict) -> None:
                 "image_url": a["creative_image_url"],
                 "alt_text": a["ad_name"],
             })
+        # 파트너십 광고는 IG/FB 원본 포스트 링크로 대체 (Slack이 자동 unfurl)
+        elif a.get("creative_post_url"):
+            blocks.insert(2, {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f":camera_with_flash: *파트너십 원본 게시물* — <{a['creative_post_url']}|보러 가기>",
+                },
+            })
 
         webhook_url = cfg["slack_webhook"]
         if not webhook_url:
@@ -1802,6 +1825,55 @@ def _resolve_image_hash(image_hash: str) -> str:
     except Exception:
         pass
     return ""
+
+
+def is_partnership_ad(ad_name: str, adset_name: str) -> bool:
+    """파트너십(인플루언서) 광고 식별.
+    - 광고명에 'partner' (대소문자 무관) 포함, 또는
+    - 광고세트명에 '파트너십' 포함
+    """
+    if ad_name and "partner" in ad_name.lower():
+        return True
+    if adset_name and "파트너십" in adset_name:
+        return True
+    return False
+
+
+def fetch_partnership_post_url(ad_id: str) -> str:
+    """파트너십 광고 전용. creative의 IG/FB 원본 포스트 URL 반환.
+
+    우선순위:
+      1) creative.instagram_permalink_url (인스타그램 포스트)
+      2) creative.object_story_id = "{page_id}_{post_id}" →
+         https://www.facebook.com/{page_id}/posts/{post_id}
+    실패 시 빈 문자열.
+    """
+    try:
+        resp = requests.get(
+            f"https://graph.facebook.com/{API_VERSION}/{ad_id}",
+            params={
+                "access_token": ACCESS_TOKEN,
+                "fields": "creative{instagram_permalink_url,object_story_id}",
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return ""
+        creative = resp.json().get("creative", {})
+
+        ig_url = creative.get("instagram_permalink_url")
+        if ig_url:
+            return ig_url
+
+        object_story_id = creative.get("object_story_id")
+        if object_story_id and "_" in object_story_id:
+            page_id, post_id = object_story_id.split("_", 1)
+            return f"https://www.facebook.com/{page_id}/posts/{post_id}"
+
+        return ""
+    except Exception as e:
+        print(f"[경고] 파트너십 포스트 URL 조회 실패 (ad_id: {ad_id}): {e}")
+        return ""
 
 
 def fetch_creative_image(ad_id: str) -> str:
@@ -2257,7 +2329,13 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
 
             if not is_recently_alerted(row["AD_ID"], cfg["brand"]):
                 repeat_count       = get_repeat_count(row["AD_ID"], cfg["brand"])
-                creative_image_url = fetch_creative_image(row["AD_ID"])
+                # 파트너십 광고는 IG/FB 원본 포스트 URL을 사용 (이미지 CDN 흐림/만료 회피)
+                if is_partnership_ad(row["AD_NAME"], row["ADSET_NAME"]):
+                    creative_image_url = ""
+                    creative_post_url  = fetch_partnership_post_url(row["AD_ID"])
+                else:
+                    creative_image_url = fetch_creative_image(row["AD_ID"])
+                    creative_post_url  = ""
                 stock_info, stock_summary, stock_md_guide, stock_product = \
                     resolve_stock_for_ad(row["AD_NAME"], cfg)
                 br_alert_data = {
@@ -2275,6 +2353,7 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
                     "ctr_12h":            row["ctr_12h"],
                     "repeat_count":       repeat_count,
                     "creative_image_url": creative_image_url,
+                    "creative_post_url":  creative_post_url,
                     "stock_info":         stock_info,
                     "stock_summary":      stock_summary,
                     "stock_md_guide":     stock_md_guide,
@@ -2342,12 +2421,23 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
                     row["clicks_prev_6h"], row["roas_prev_6h"],
                     brand=cfg["brand"],
                 )
-                print(f"  -> 소재 이미지 조회 중...")
-                creative_image_url = fetch_creative_image(row["AD_ID"])
-                if creative_image_url:
-                    print(f"  -> 이미지 확보: {creative_image_url[:60]}...")
+                # 파트너십 광고는 IG/FB 원본 포스트 URL을 사용 (이미지 CDN 흐림/만료 회피)
+                if is_partnership_ad(row["AD_NAME"], row["ADSET_NAME"]):
+                    print(f"  -> 파트너십 광고 감지 — 포스트 URL 조회 중...")
+                    creative_image_url = ""
+                    creative_post_url  = fetch_partnership_post_url(row["AD_ID"])
+                    if creative_post_url:
+                        print(f"  -> 포스트 URL 확보: {creative_post_url}")
+                    else:
+                        print(f"  -> 포스트 URL 없음")
                 else:
-                    print(f"  -> 이미지 없음 (파트너십 광고 또는 영상 소재)")
+                    print(f"  -> 소재 이미지 조회 중...")
+                    creative_image_url = fetch_creative_image(row["AD_ID"])
+                    creative_post_url  = ""
+                    if creative_image_url:
+                        print(f"  -> 이미지 확보: {creative_image_url[:60]}...")
+                    else:
+                        print(f"  -> 이미지 없음 (영상 소재 등)")
 
                 stock_info, stock_summary, stock_md_guide, stock_product = \
                     resolve_stock_for_ad(row["AD_NAME"], cfg)
@@ -2374,6 +2464,7 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
                     "ctr_12h":            row["ctr_12h"],
                     "repeat_count":       repeat_count,
                     "creative_image_url": creative_image_url,
+                    "creative_post_url":  creative_post_url,
                     "stock_info":         stock_info,
                     "stock_summary":      stock_summary,
                     "stock_md_guide":     stock_md_guide,
