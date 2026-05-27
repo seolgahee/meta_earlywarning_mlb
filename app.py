@@ -160,14 +160,16 @@ def check_recent_snapshot_skip(window_minutes: int = 30) -> None:
 #   성인은 평소 전환 볼륨이 높아(6h당 0.65건 baseline) purch>=3로 강화
 #   키즈는 spend 분포가 성인 절반이고 ROAS p75=8.16으로 우수 → spend 컷 완화 + ROAS 강화
 OPP_FILTERS = {
-    "MLB": {        # 성인 v2 (2026-05-21, 10일치): ROAS p75=4.52 → 분포 중앙 컷이라 4.0→5.0(p85)로 ↑
+    # 2026-05-27: v2(5/21 적용) 후 8일간 알럿 0건 발송 확인 → v1 복귀.
+    # v2 strict 과다 + 12h 매칭 데드존(KST 01~07)으로 게이트 전수 컷되던 상황.
+    "MLB": {        # 성인 v1: roas≥4, spend≥10k, purch≥3
         "purchases_6h_min":  3,
         "spend_6h_min":      10_000,
-        "roas_6h_min":       5.0,   # 500%
+        "roas_6h_min":       4.0,   # 400%
     },
-    "MLB_KIDS": {   # 키즈 v2 (2026-05-21, 10일치): hits 387건/주 과다 → spend 5k→10k + purch 2→3
-        "purchases_6h_min":  3,
-        "spend_6h_min":      10_000,
+    "MLB_KIDS": {   # 키즈 v1: roas≥5, spend≥5k, purch≥2 (광고당 spend 작아 spend 컷 완화)
+        "purchases_6h_min":  2,
+        "spend_6h_min":      5_000,
         "roas_6h_min":       5.0,   # 500%
     },
 }
@@ -182,15 +184,15 @@ def _get_opp_filter(brand: str) -> dict:
 _GUIDE_SCALE = "전환 효율이 급증한 구간입니다. ASC 캠페인 일cap 상향을 검토하세요."
 _GUIDE_EXTRACT = "해당 소재 내 상품을 확인하여 동일 상품 기반 신규 소재 2~3종 추가 제작을 권장합니다."
 ACTION_CONDITIONS_BY_BRAND = {
-    "MLB": {        # 성인 v2: entry roas≥5, spend≥10k, purch≥3 — roas는 entry와 동기
-        "CAMPAIGN_SCALE":   {"roas_6h_min": 5.0, "purchases_6h_min": 4,       "guide": _GUIDE_SCALE},
-        "PRODUCT_EXTRACTION":{"roas_6h_min": 5.0, "spend_6h_min": 50_000,     "guide": _GUIDE_EXTRACT},
-        "CREATIVE_EXPANSION":{"roas_6h_min": 5.0, "purchases_6h_min": 3,       "guide": _GUIDE_EXTRACT},
+    "MLB": {        # 성인 v1: entry roas≥4, spend≥10k, purch≥3 — roas는 entry와 동기
+        "CAMPAIGN_SCALE":   {"roas_6h_min": 4.0, "purchases_6h_min": 4,       "guide": _GUIDE_SCALE},
+        "PRODUCT_EXTRACTION":{"roas_6h_min": 4.0, "spend_6h_min": 50_000,     "guide": _GUIDE_EXTRACT},
+        "CREATIVE_EXPANSION":{"roas_6h_min": 4.0, "purchases_6h_min": 3,       "guide": _GUIDE_EXTRACT},
     },
-    "MLB_KIDS": {   # 키즈 v2: entry roas≥5, spend≥10k, purch≥3 — purch entry+1 패턴 유지
-        "CAMPAIGN_SCALE":   {"roas_6h_min": 5.0, "purchases_6h_min": 4,       "guide": _GUIDE_SCALE},
+    "MLB_KIDS": {   # 키즈 v1: entry roas≥5, spend≥5k, purch≥2 — purch entry+1 패턴
+        "CAMPAIGN_SCALE":   {"roas_6h_min": 5.0, "purchases_6h_min": 3,       "guide": _GUIDE_SCALE},
         "PRODUCT_EXTRACTION":{"roas_6h_min": 5.0, "spend_6h_min": 25_000,     "guide": _GUIDE_EXTRACT},
-        "CREATIVE_EXPANSION":{"roas_6h_min": 5.0, "purchases_6h_min": 3,       "guide": _GUIDE_EXTRACT},
+        "CREATIVE_EXPANSION":{"roas_6h_min": 5.0, "purchases_6h_min": 2,       "guide": _GUIDE_EXTRACT},
     },
 }
 
