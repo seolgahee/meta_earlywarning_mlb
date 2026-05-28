@@ -160,17 +160,17 @@ def check_recent_snapshot_skip(window_minutes: int = 30) -> None:
 #   성인은 평소 전환 볼륨이 높아(6h당 0.65건 baseline) purch>=3로 강화
 #   키즈는 spend 분포가 성인 절반이고 ROAS p75=8.16으로 우수 → spend 컷 완화 + ROAS 강화
 OPP_FILTERS = {
-    # 2026-05-27: v2(5/21 적용) 후 8일간 알럿 0건 발송 확인 → v1 복귀.
-    # v2 strict 과다 + 12h 매칭 데드존(KST 01~07)으로 게이트 전수 컷되던 상황.
-    "MLB": {        # 성인 v1: roas≥4, spend≥10k, purch≥3
-        "purchases_6h_min":  3,
-        "spend_6h_min":      10_000,
-        "roas_6h_min":       4.0,   # 400%
-    },
-    "MLB_KIDS": {   # 키즈 v1: roas≥5, spend≥5k, purch≥2 (광고당 spend 작아 spend 컷 완화)
-        "purchases_6h_min":  2,
-        "spend_6h_min":      5_000,
+    # 2026-05-28 v3: 최근 7일 분포 재산정 (성인 1963샘플/28광고, 키즈 3582샘플/57광고).
+    # 균형 타깃 — 성인 1~2건/일, 키즈 0.5~1건/일. v1 시뮬 대비 각각 52% / 66% 감소.
+    "MLB": {        # 성인 v3: roas≥5, spend≥15k, purch≥4 (PURCH_6H p95=4, ROAS p90=7.4)
+        "purchases_6h_min":  4,
+        "spend_6h_min":      15_000,
         "roas_6h_min":       5.0,   # 500%
+    },
+    "MLB_KIDS": {   # 키즈 v3: roas≥6, spend≥10k, purch≥4 (purch>=4 cohort ROAS p50=13.3)
+        "purchases_6h_min":  4,
+        "spend_6h_min":      10_000,
+        "roas_6h_min":       6.0,   # 600%
     },
 }
 
@@ -184,15 +184,15 @@ def _get_opp_filter(brand: str) -> dict:
 _GUIDE_SCALE = "전환 효율이 급증한 구간입니다. ASC 캠페인 일cap 상향을 검토하세요."
 _GUIDE_EXTRACT = "해당 소재 내 상품을 확인하여 동일 상품 기반 신규 소재 2~3종 추가 제작을 권장합니다."
 ACTION_CONDITIONS_BY_BRAND = {
-    "MLB": {        # 성인 v1: entry roas≥4, spend≥10k, purch≥3 — roas는 entry와 동기
-        "CAMPAIGN_SCALE":   {"roas_6h_min": 4.0, "purchases_6h_min": 4,       "guide": _GUIDE_SCALE},
-        "PRODUCT_EXTRACTION":{"roas_6h_min": 4.0, "spend_6h_min": 50_000,     "guide": _GUIDE_EXTRACT},
-        "CREATIVE_EXPANSION":{"roas_6h_min": 4.0, "purchases_6h_min": 3,       "guide": _GUIDE_EXTRACT},
+    "MLB": {        # 성인 v3: entry roas≥5, spend≥15k, purch≥4 — SCALE는 entry+1
+        "CAMPAIGN_SCALE":   {"roas_6h_min": 5.0, "purchases_6h_min": 5,       "guide": _GUIDE_SCALE},
+        "PRODUCT_EXTRACTION":{"roas_6h_min": 5.0, "spend_6h_min": 50_000,     "guide": _GUIDE_EXTRACT},
+        "CREATIVE_EXPANSION":{"roas_6h_min": 5.0, "purchases_6h_min": 4,       "guide": _GUIDE_EXTRACT},
     },
-    "MLB_KIDS": {   # 키즈 v1: entry roas≥5, spend≥5k, purch≥2 — purch entry+1 패턴
-        "CAMPAIGN_SCALE":   {"roas_6h_min": 5.0, "purchases_6h_min": 3,       "guide": _GUIDE_SCALE},
-        "PRODUCT_EXTRACTION":{"roas_6h_min": 5.0, "spend_6h_min": 25_000,     "guide": _GUIDE_EXTRACT},
-        "CREATIVE_EXPANSION":{"roas_6h_min": 5.0, "purchases_6h_min": 2,       "guide": _GUIDE_EXTRACT},
+    "MLB_KIDS": {   # 키즈 v3: entry roas≥6, spend≥10k, purch≥4 — SCALE는 entry+1
+        "CAMPAIGN_SCALE":   {"roas_6h_min": 6.0, "purchases_6h_min": 5,       "guide": _GUIDE_SCALE},
+        "PRODUCT_EXTRACTION":{"roas_6h_min": 6.0, "spend_6h_min": 30_000,     "guide": _GUIDE_EXTRACT},
+        "CREATIVE_EXPANSION":{"roas_6h_min": 6.0, "purchases_6h_min": 4,       "guide": _GUIDE_EXTRACT},
     },
 }
 
@@ -228,11 +228,17 @@ BR_ALERT_CONDITIONS_BY_BRAND = {
 def _get_br_cond(brand: str) -> dict:
     return BR_ALERT_CONDITIONS_BY_BRAND.get(brand, BR_ALERT_CONDITIONS_BY_BRAND["MLB"])
 
-# Kill Alert 조건
-KILL_CONDITION = {
-    "roas_12h_max":  1.2,     # 120%   # TODO(per-brand): MLB 성인/키즈 재산출 대상
-    "spend_12h_min": 150_000,         # TODO(per-brand): MLB 성인/키즈 재산출 대상
+# Kill Alert 조건 — 2026-05-28 v3: 7일 분포 기반 키즈 분기 신설
+# 성인: SPEND_12H p90=250k라 150k 컷 유지 시 0.6건/일 (적정)
+# 키즈: SPEND_12H p90=130k로 성인 컷이면 발동 0건 → spend≥80k, ROAS 베이스라인 높아 ≤1.5
+KILL_CONDITION_BY_BRAND = {
+    "MLB":      {"roas_12h_max": 1.2, "spend_12h_min": 150_000},
+    "MLB_KIDS": {"roas_12h_max": 1.5, "spend_12h_min":  80_000},
 }
+
+
+def _get_kill_cond(brand: str) -> dict:
+    return KILL_CONDITION_BY_BRAND.get(brand, KILL_CONDITION_BY_BRAND["MLB"])
 
 # 재고 일수(DoS) 컷오프 — 과거 30일 정확도 시뮬레이션 기반 (Precision 최적)
 # 성인: 보충 변동성 큼 → 짧은 컷오프로 진짜 위급만 / 키즈: 더 예측 가능 → 약간 여유
@@ -2483,7 +2489,7 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
                 print(f"  -> 12시간 내 발송 이력 있음. 건너뜀.")
 
         # ── Kill Alert ──
-        kl = KILL_CONDITION
+        kl = _get_kill_cond(cfg["brand"])
         if row["roas_12h"] <= kl["roas_12h_max"] and row["spend_12h"] >= kl["spend_12h_min"]:
             print(f"[KILL] {ad_info}")
             print(f"  roas_12h={row['roas_12h']:.1%}  spend_12h={row['spend_12h']:,.0f}원")
