@@ -2303,6 +2303,15 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
             print(f"  [제외] 카탈로그 광고: {row['AD_NAME']}")
             continue
 
+        # ===== [임시 디버그] 게이트 입력값 추적 — 확인 후 제거 =====
+        if "260522" in ad_name_lower:
+            print(f"  [DBG] {str(row['AD_NAME'])[:42]} ch={row.get('CHANNEL')} "
+                  f"spend_6h={row['spend_6h']:,.0f} purch_6h={int(row['purchases_6h'])} "
+                  f"roas_6h={row['roas_6h']:.0%} spend_prev_6h={row['spend_prev_6h']:,.0f} "
+                  f"6h_past_NULL={pd.isna(row.get('SPEND_6H_PAST'))} "
+                  f"12h_past_NULL={pd.isna(row.get('SPEND_12H_PAST'))}")
+        # ===== [임시 디버그 끝] =====
+
         campaign_tokens  = re.split(r'[\s_\-|/]+', str(row.get("CAMPAIGN_NAME", "")))
         is_br_campaign   = "BR" in [t.upper() for t in campaign_tokens]
 
