@@ -116,15 +116,11 @@ _gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else Non
 
 
 # ─────────────────────────────────────────
-# 운영 시간 체크 (KST 01:00 ~ 07:00 실행 금지)
+# 실행 시각 로그 (24h 운영 — 새벽 스킵 제거: TOTAL_CUM 자정-safe라 6h/12h 매칭 데드존 해소)
 # ─────────────────────────────────────────
 def check_operating_hours() -> None:
     kst_now = datetime.now(ZoneInfo("Asia/Seoul"))
-    hour    = kst_now.hour
-    if 1 <= hour < 7:
-        print(f"[종료] 새벽 시간대이므로 실행하지 않음 (현재 KST: {kst_now.strftime('%Y-%m-%d %H:%M')})")
-        exit(0)
-    print(f"[정보] 운영 시간 확인 완료 (현재 KST: {kst_now.strftime('%Y-%m-%d %H:%M')})")
+    print(f"[정보] 실행 시각 (현재 KST: {kst_now.strftime('%Y-%m-%d %H:%M')})")
 
 
 def check_recent_snapshot_skip(window_minutes: int = 30) -> None:
@@ -2302,15 +2298,6 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
         if "com" in ad_name_lower and "카탈로그" in ad_name_lower:
             print(f"  [제외] 카탈로그 광고: {row['AD_NAME']}")
             continue
-
-        # ===== [임시 디버그] 게이트 입력값 추적 — 확인 후 제거 =====
-        if "260522" in ad_name_lower:
-            print(f"  [DBG] {str(row['AD_NAME'])[:42]} ch={row.get('CHANNEL')} "
-                  f"spend_6h={row['spend_6h']:,.0f} purch_6h={int(row['purchases_6h'])} "
-                  f"roas_6h={row['roas_6h']:.0%} spend_prev_6h={row['spend_prev_6h']:,.0f} "
-                  f"6h_past_NULL={pd.isna(row.get('SPEND_6H_PAST'))} "
-                  f"12h_past_NULL={pd.isna(row.get('SPEND_12H_PAST'))}")
-        # ===== [임시 디버그 끝] =====
 
         campaign_tokens  = re.split(r'[\s_\-|/]+', str(row.get("CAMPAIGN_NAME", "")))
         is_br_campaign   = "BR" in [t.upper() for t in campaign_tokens]
