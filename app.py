@@ -8,6 +8,7 @@ Meta Ads 조기경보 시스템
 import os
 import re
 import json
+import time
 import unicodedata
 import smtplib
 from datetime import datetime, timezone, timedelta
@@ -2007,13 +2008,39 @@ def fetch_insights() -> list:
     all_data = []
     print(f"[정보] Meta API 호출 중... (버전: {API_VERSION})")
 
+    # Meta는 일시 과부하 시 "Service temporarily unavailable"(코드 2)/HTTP 5xx를 반환 →
+    # 재시도 없이 죽으면 그 시각 run 전체(fetch→load→evaluate→발송)가 통째로 누락됨.
+    # 각 페이지 요청을 지수 백오프로 최대 4회 재시도.
+    MAX_RETRIES = 4
     while url:
-        response = requests.get(url, params=params)
-        if response.status_code != 200:
-            err = response.json().get("error", {})
+        body = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = requests.get(url, params=params, timeout=60)
+            except requests.RequestException as e:
+                if attempt == MAX_RETRIES - 1:
+                    print(f"[오류] API 호출 실패 (네트워크): {e} — {MAX_RETRIES}회 재시도 후 포기")
+                    return []
+                wait = 2 ** attempt
+                print(f"[재시도] 네트워크 오류 ({e}) — {wait}초 후 재시도 ({attempt + 1}/{MAX_RETRIES})")
+                time.sleep(wait)
+                continue
+            if response.status_code == 200:
+                body = response.json()
+                break
+            err  = response.json().get("error", {})
+            code = err.get("code")
+            transient = response.status_code >= 500 or code in (1, 2, 4, 17, 341, 613)
+            if transient and attempt < MAX_RETRIES - 1:
+                wait = 2 ** attempt
+                print(f"[재시도] API 일시 오류 (HTTP {response.status_code}, code {code}: {err.get('message')}) "
+                      f"— {wait}초 후 재시도 ({attempt + 1}/{MAX_RETRIES})")
+                time.sleep(wait)
+                continue
             print(f"[오류] API 호출 실패 (HTTP {response.status_code}): {err.get('message')}")
             return []
-        body = response.json()
+        if body is None:
+            return []
         all_data.extend(body.get("data", []))
         url    = body.get("paging", {}).get("next")
         params = {}
@@ -2215,15 +2242,15 @@ def evaluate_alerts(df_now: pd.DataFrame, cfg: dict) -> None:
                                ORDER BY ABS(DATEDIFF('minute',
                                    snapshot_ts,
                                    DATEADD('hour', -{hours},
-                                       CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP()))
+                                       SYSDATE())
                                ))
                            ) AS rn
                     FROM {SNOWFLAKE_DATABASE}.{SNOWFLAKE_SCHEMA}.{SNOWFLAKE_TABLE.upper()}
                     WHERE brand = '{cfg["brand"]}'
                       AND snapshot_ts >= DATEADD('hour', -{hours + 2},
-                              CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP()))
+                              SYSDATE())
                       AND snapshot_ts <= DATEADD('hour', -{hours - 2},
-                              CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP()))
+                              SYSDATE())
                 ) WHERE rn = 1
             """
             cursor.execute(query)
